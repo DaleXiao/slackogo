@@ -1,4 +1,4 @@
-<![CDATA[<div align="center">
+<div align="center">
 
 # 🔧 slacko
 
@@ -175,4 +175,3 @@ Credentials are stored locally in `~/.config/slacko/`.
 ## License
 
 MIT
-]]>
