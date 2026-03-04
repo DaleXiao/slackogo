@@ -10,6 +10,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
 
+	"github.com/DaleXiao/slackogo/internal/api"
 	"github.com/DaleXiao/slackogo/internal/app"
 	"github.com/DaleXiao/slackogo/internal/auth"
 	"github.com/DaleXiao/slackogo/internal/output"
@@ -244,16 +245,57 @@ func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 	token := ""
 	if !cmd.CookieOnly {
 		p.Human("Extracting token from %s browser tabs...", cmd.Browser)
-		t, jsErr := auth.ExtractTokenFromBrowser(cmd.Browser)
+		rawTokens, jsErr := auth.ExtractTokenFromBrowser(cmd.Browser)
 		if jsErr != nil {
 			p.Human("  Token extraction failed: %v", jsErr)
 			p.Human("  Falling back to manual token entry")
 		} else {
-			token = t
+			// May have multiple tokens (Enterprise Grid: E-prefix vs T-prefix team_id)
+			// Test each token to find the workspace-level one (team_id starts with T)
+			candidates := strings.Split(rawTokens, "\n")
 			if ctx.Verbose {
-				p.Human("  Token: %s...%s", token[:15], token[len(token)-4:])
+				p.Human("  Found %d token candidate(s)", len(candidates))
 			}
-			p.Success("✓ Token extracted from browser")
+			for _, candidate := range candidates {
+				candidate = strings.TrimSpace(candidate)
+				if !strings.HasPrefix(candidate, "xoxc-") {
+					continue
+				}
+				if ctx.Verbose {
+					p.Human("  Testing token: %s...%s", candidate[:15], candidate[len(candidate)-4:])
+				}
+				// Quick auth.test to check team_id
+				teamID, err := testToken(candidate, r.Cookie, cmd.Target)
+				if err != nil {
+					if ctx.Verbose {
+						p.Human("    auth.test failed: %v", err)
+					}
+					continue
+				}
+				if ctx.Verbose {
+					p.Human("    team_id: %s", teamID)
+				}
+				if strings.HasPrefix(teamID, "T") {
+					token = candidate
+					p.Success("✓ Workspace token found (team_id: %s)", teamID)
+					break
+				} else {
+					if ctx.Verbose {
+						p.Human("    Skipping enterprise token (team_id: %s)", teamID)
+					}
+				}
+			}
+			if token == "" && len(candidates) > 0 {
+				// No T-prefix token found — use the first valid one as fallback
+				for _, c := range candidates {
+					c = strings.TrimSpace(c)
+					if strings.HasPrefix(c, "xoxc-") {
+						token = c
+						p.Human("  Warning: using enterprise-level token (may have API limitations)")
+						break
+					}
+				}
+			}
 		}
 	}
 
@@ -294,6 +336,22 @@ func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 	}
 
 	return nil
+}
+
+// testToken calls auth.test with the given token+cookie to get the team_id.
+// Returns team_id on success. Uses utls transport for Chrome TLS fingerprint.
+func testToken(token, cookie, workspace string) (string, error) {
+	creds := &auth.Credentials{
+		Token:     token,
+		Cookie:    cookie,
+		Workspace: workspace,
+	}
+	client := api.NewClient(creds, 10*time.Second)
+	info, err := client.AuthTest()
+	if err != nil {
+		return "", err
+	}
+	return info.TeamID, nil
 }
 
 func runAuthManual(_ *app.Context, cmd *AuthManualCmd) error {

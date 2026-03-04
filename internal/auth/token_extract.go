@@ -8,8 +8,7 @@ import (
 )
 
 // ExtractTokenFromBrowser uses AppleScript (macOS) or PowerShell (Windows)
-// to execute JS in the active Slack browser tab. No CDP, no extra HTTP
-// requests — reads directly from the already-loaded page.
+// to execute JS in the active Slack browser tab.
 func ExtractTokenFromBrowser(browser string) (token string, err error) {
 	switch runtime.GOOS {
 	case "darwin":
@@ -34,28 +33,32 @@ func extractTokenMacOS(browser string) (string, error) {
 		return "", fmt.Errorf("AppleScript token extraction supports: chrome, edge, brave (got %q)", browser)
 	}
 
-	// Priority 1: boot_data.api_token from script tags (workspace-level token)
-	// Priority 2: localStorage fallback (may be enterprise-level, has API limitations)
+	// JS that extracts ALL xoxc- tokens from localStorage, separated by newlines.
+	// The caller will filter for workspace-level token (T-prefix team_id) via auth.test.
 	//
-	// Using single-line JS to avoid AppleScript multi-line escaping issues.
-	// The JS is passed as a separate -e argument to avoid quote conflicts.
-	js := `(function(){` +
+	// Priority: boot_data script tags first, then localStorage.
+	// In Enterprise Grid, localStorage may have both enterprise (E-prefix) and
+	// workspace (T-prefix) tokens. We return all candidates and let the caller pick.
+	js := `(function(){var r=[];` +
 		`var s=document.querySelectorAll('script');` +
 		`for(var i=0;i<s.length;i++){` +
 		`var m=s[i].textContent.match(/\"api_token\"\\s*:\\s*\"(xoxc-[^\"]+)\"/);` +
-		`if(m)return m[1]}` +
-		`if(typeof boot_data!=='undefined'&&boot_data.api_token)return boot_data.api_token;` +
-		`if(typeof TS!=='undefined'&&TS.boot_data&&TS.boot_data.api_token)return TS.boot_data.api_token;` +
-		`return 'NOT_FOUND'})()`
+		`if(m)r.push(m[1])}` +
+		`if(typeof boot_data!=='undefined'&&boot_data.api_token&&boot_data.api_token.indexOf('xoxc-')===0)r.push(boot_data.api_token);` +
+		`if(typeof TS!=='undefined'&&TS.boot_data&&TS.boot_data.api_token&&TS.boot_data.api_token.indexOf('xoxc-')===0)r.push(TS.boot_data.api_token);` +
+		`for(var j=0;j<localStorage.length;j++){` +
+		`var v=localStorage.getItem(localStorage.key(j));` +
+		`if(v&&v.indexOf('xoxc-')===0)r.push(v);` +
+		`try{var o=JSON.parse(v);if(o&&o.token&&o.token.indexOf('xoxc-')===0)r.push(o.token)}catch(e){}}` +
+		`return[...new Set(r)].join('\\n')})()`
 
-	// Build AppleScript that iterates tabs to find Slack
 	script := fmt.Sprintf(`tell application "%s"
 	set tokenResult to "NOT_FOUND"
 	repeat with w in every window
 		repeat with t in every tab of w
 			if URL of t contains ".slack.com" then
 				set tokenResult to (execute t javascript "%s")
-				if tokenResult starts with "xoxc-" then
+				if tokenResult contains "xoxc-" then
 					return tokenResult
 				end if
 			end if
@@ -72,10 +75,11 @@ end tell`, appName, strings.ReplaceAll(js, `"`, `\"`))
 	}
 
 	result := strings.TrimSpace(string(out))
-	if !strings.HasPrefix(result, "xoxc-") {
+	if !strings.Contains(result, "xoxc-") {
 		return "", fmt.Errorf("no xoxc- token found in %s Slack tabs. Make sure your Slack workspace is fully loaded", appName)
 	}
 
+	// Return all tokens newline-separated — caller filters via auth.test
 	return result, nil
 }
 
@@ -90,17 +94,19 @@ func extractTokenWindows(browser string) (string, error) {
 		return "", fmt.Errorf("PowerShell token extraction supports: chrome, edge (got %q)", browser)
 	}
 
-	// JS to extract token — prioritize boot_data script tags over localStorage
-	js := `(function(){` +
+	js := `(function(){var r=[];` +
 		`var s=document.querySelectorAll('script');` +
 		`for(var i=0;i<s.length;i++){` +
 		`var m=s[i].textContent.match(/\"api_token\"\\s*:\\s*\"(xoxc-[^\"]+)\"/);` +
-		`if(m)return m[1]}` +
-		`if(typeof boot_data!=='undefined'&&boot_data.api_token)return boot_data.api_token;` +
-		`if(typeof TS!=='undefined'&&TS.boot_data&&TS.boot_data.api_token)return TS.boot_data.api_token;` +
-		`return 'NOT_FOUND'})()`
+		`if(m)r.push(m[1])}` +
+		`if(typeof boot_data!=='undefined'&&boot_data.api_token&&boot_data.api_token.indexOf('xoxc-')===0)r.push(boot_data.api_token);` +
+		`if(typeof TS!=='undefined'&&TS.boot_data&&TS.boot_data.api_token&&TS.boot_data.api_token.indexOf('xoxc-')===0)r.push(TS.boot_data.api_token);` +
+		`for(var j=0;j<localStorage.length;j++){` +
+		`var v=localStorage.getItem(localStorage.key(j));` +
+		`if(v&&v.indexOf('xoxc-')===0)r.push(v);` +
+		`try{var o=JSON.parse(v);if(o&&o.token&&o.token.indexOf('xoxc-')===0)r.push(o.token)}catch(e){}}` +
+		`return[...new Set(r)].join('\\n')})()`
 
-	// PowerShell: activate browser, open console, execute JS, read clipboard
 	psScript := fmt.Sprintf(`
 Add-Type -AssemblyName System.Windows.Forms
 $proc = Get-Process -Name "%s" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne "" } | Select-Object -First 1
@@ -131,7 +137,7 @@ Write-Output $result
 	if result == "BROWSER_NOT_FOUND" {
 		return "", fmt.Errorf("browser %s not found running. Open Slack in %s first", exeName, exeName)
 	}
-	if !strings.HasPrefix(result, "xoxc-") {
+	if !strings.Contains(result, "xoxc-") {
 		return "", fmt.Errorf("no xoxc- token found. Make sure the active tab in %s is your Slack workspace", exeName)
 	}
 

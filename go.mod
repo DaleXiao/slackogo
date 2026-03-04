@@ -5,16 +5,19 @@ go 1.24
 require (
 	github.com/alecthomas/kong v1.6.1
 	github.com/fatih/color v1.18.0
+	github.com/refraction-networking/utls v1.8.2
 	github.com/steipete/sweetcookie v0.0.0-20260102214724-68ec5a0bced4
 )
 
 require (
 	al.essio.dev/pkg/shellescape v1.5.1 // indirect
+	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
