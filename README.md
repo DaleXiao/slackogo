@@ -59,20 +59,32 @@ Grab a pre-built binary from [Releases](https://github.com/DaleXiao/slackogo/rel
 
 ### 1. Get your credentials
 
-**Option A: Import from browser** (easiest)
+**Option A: Import from browser** (recommended)
 
 ```bash
-slackogo auth import --browser chrome
-slackogo auth import --browser edge
-slackogo auth import --browser brave
-slackogo auth import --browser edge --browser-profile "Profile 1"
+# Step 1: Start Edge with CDP enabled
+# Windows:
+msedge.exe --remote-debugging-port=9222
+# macOS:
+/Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222
+
+# Step 2: Open your Slack workspace in that browser window
+
+# Step 3: Import (extracts cookie locally + token via CDP — no extra HTTP requests)
+slackogo auth import --browser edge -t your-workspace
 ```
 
-Supported browsers: Chrome, Edge, Brave, Firefox, Safari. Cookie extraction and xoxc- token discovery are fully automatic — no DevTools needed.
+For non-Enterprise workspaces, CDP is optional:
+```bash
+slackogo auth import --browser chrome
+slackogo auth import --browser edge --no-cdp
+```
+
+Supported browsers for cookie extraction: Chrome, Edge, Brave, Firefox, Safari.
 
 **Option B: Manual setup**
 
-If automatic import doesn't work (e.g. locked cookie DB), you can set credentials manually:
+If automatic import doesn't work, set credentials manually:
 
 Open your browser → Slack workspace → F12:
 - **d cookie**: Application → Cookies → `.slack.com` → `d`
@@ -174,10 +186,10 @@ Credentials are stored locally in `~/.config/slackogo/`.
 
 ## Features
 
-- **One-command setup** — `slackogo auth import --browser edge` extracts cookies and tokens automatically
-- **Browser fingerprint** — API requests mimic real Edge browser headers to avoid detection
+- **One-command setup** — cookie extraction + CDP token discovery, zero extra HTTP requests
+- **Enterprise Grid safe** — uses CDP to read tokens from your already-open browser tab, never triggers security detection
+- **Browser fingerprint** — API requests mimic real Edge browser headers
 - **Cookie rotation** — automatically captures and persists Slack's rotated `d` cookie
-- **Enterprise Grid compatible** — designed to work with Enterprise Grid workspaces
 
 ## Project Structure
 

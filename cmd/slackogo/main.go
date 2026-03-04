@@ -61,6 +61,8 @@ type AuthImportCmd struct {
 	Browser        string `help:"Browser to import from (chrome,edge,brave,firefox,safari)" default:"chrome" enum:"chrome,edge,brave,firefox,safari"`
 	BrowserProfile string `help:"Browser profile name" optional:""`
 	Target         string `help:"Target workspace domain (e.g. myteam) for Enterprise Grid" optional:"" name:"target" short:"t"`
+	CDPPort        int    `help:"CDP remote debugging port (default 9222)" optional:"" name:"cdp-port" default:"9222"`
+	NoCDP          bool   `help:"Skip CDP token extraction (cookie only)" optional:"" name:"no-cdp"`
 }
 
 type AuthManualCmd struct {
@@ -225,41 +227,76 @@ func main() {
 
 func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 	p := ctx.Printer
+
+	// Step 1: Extract cookie from browser (local only, no network)
 	p.Human("Extracting cookie from %s (local only, no network requests)...", cmd.Browser)
 	results, err := auth.ImportFromBrowser(cmd.Browser, cmd.BrowserProfile, cmd.Target)
 	if err != nil {
 		return err
 	}
 
-	for _, r := range results {
-		if ctx.Verbose && r.Cookie != "" {
-			p.Human("  Cookie: %s", r.Cookie)
-		}
+	r := results[0]
+	if ctx.Verbose && r.Cookie != "" {
+		p.Human("  Cookie: %s", r.Cookie)
+	}
+	p.Success("✓ Cookie extracted from %s", cmd.Browser)
 
-		if r.Workspace != "" {
-			cred := auth.Credentials{
-				Cookie:    r.Cookie,
-				Workspace: r.Workspace,
-			}
-			_ = auth.AddOrUpdateCredentials(cred)
-			p.Success("✓ Cookie saved for workspace: %s", r.Workspace)
+	// Step 2: Try CDP token extraction (unless --no-cdp)
+	token := ""
+	cdpWorkspace := ""
+	if !cmd.NoCDP {
+		p.Human("Connecting to browser CDP on port %d...", cmd.CDPPort)
+		t, w, cdpErr := auth.ExtractTokenViaCDP(cmd.CDPPort)
+		if cdpErr != nil {
+			p.Human("  CDP token extraction failed: %v", cdpErr)
+			p.Human("  Falling back to manual token entry")
 		} else {
-			p.Success("✓ Cookie extracted")
+			token = t
+			cdpWorkspace = w
+			if ctx.Verbose {
+				p.Human("  Token: %s...%s", token[:15], token[len(token)-4:])
+			}
+			p.Success("✓ Token extracted via CDP")
 		}
+	}
 
-		if !ctx.Verbose && r.Cookie != "" {
+	// Determine workspace
+	workspace := cmd.Target
+	if workspace == "" {
+		workspace = cdpWorkspace
+	}
+	if workspace == "" {
+		workspace = r.Workspace
+	}
+
+	// Step 3: Save credentials
+	if token != "" && workspace != "" {
+		cred := auth.Credentials{
+			Token:     token,
+			Cookie:    r.Cookie,
+			Workspace: workspace,
+		}
+		if err := auth.AddOrUpdateCredentials(cred); err != nil {
+			return fmt.Errorf("failed to save credentials: %w", err)
+		}
+		p.Success("✓ Credentials saved for %s", workspace)
+		p.Human("\nVerify with: slackogo auth status")
+	} else if workspace != "" {
+		// Save cookie only
+		cred := auth.Credentials{
+			Cookie:    r.Cookie,
+			Workspace: workspace,
+		}
+		_ = auth.AddOrUpdateCredentials(cred)
+		p.Success("✓ Cookie saved for %s", workspace)
+		p.Human("\nNext step — add your xoxc- token:")
+		p.Human("  slackogo auth manual --token xoxc-YOUR-TOKEN %s", workspace)
+		p.Human("\nTo find the token: open Slack in browser → F12 → Network → filter 'api/' → any request → Form Data → 'token'")
+	} else {
+		if !ctx.Verbose {
 			p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
 		}
-
-		p.Human("")
-		p.Human("Next step — add your xoxc- token:")
-		if r.Workspace != "" {
-			p.Human("  slackogo auth manual --token xoxc-YOUR-TOKEN %s", r.Workspace)
-		} else {
-			p.Human("  slackogo auth manual --token xoxc-YOUR-TOKEN --cookie '%s' WORKSPACE", r.Cookie)
-		}
-		p.Human("")
-		p.Human("To find the token: open Slack in browser → F12 → Network → filter 'api/' → any request → Form Data → 'token'")
+		p.Human("\nUse: slackogo auth manual --token <TOKEN> --cookie '<COOKIE>' <WORKSPACE>")
 	}
 
 	return nil

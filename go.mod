@@ -5,6 +5,7 @@ go 1.24
 require (
 	github.com/alecthomas/kong v1.6.1
 	github.com/fatih/color v1.18.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/steipete/sweetcookie v0.0.0-20260102214724-68ec5a0bced4
 )
 
