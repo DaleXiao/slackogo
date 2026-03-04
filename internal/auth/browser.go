@@ -28,10 +28,16 @@ type ImportResult struct {
 	Workspace string
 	TeamName  string
 	Error     string
+	// CookieOnly indicates that only the cookie was saved (no token extraction attempted)
+	CookieOnly bool
 }
 
-// ImportFromBrowser extracts the d cookie and xoxc- tokens from a browser's cookie store.
-func ImportFromBrowser(browser, browserProfile string) ([]ImportResult, error) {
+// ImportFromBrowser extracts the d cookie and optionally xoxc- tokens.
+// If workspace is provided, it targets that specific workspace (for Enterprise Grid).
+// Token extraction makes HTTP requests that may trigger security alerts on
+// Enterprise Grid — if that's a concern, use --workspace to save cookie-only
+// and then provide the token manually.
+func ImportFromBrowser(browser, browserProfile, workspace string) ([]ImportResult, error) {
 	browser = strings.ToLower(browser)
 
 	scBrowser, ok := supportedBrowsers[browser]
@@ -43,7 +49,6 @@ func ImportFromBrowser(browser, browserProfile string) ([]ImportResult, error) {
 		return nil, fmt.Errorf("unsupported browser %q. Supported: %s", browser, strings.Join(names, ", "))
 	}
 
-	// Also try to get the lc cookie (last workspace) for context
 	opts := sweetcookie.Options{
 		URL:      "https://slack.com/",
 		Names:    []string{"d"},
@@ -62,26 +67,39 @@ func ImportFromBrowser(browser, browserProfile string) ([]ImportResult, error) {
 
 	cookie := res.Cookies[0].Value
 
-	// Extract tokens — single page load, mimics normal browser navigation
-	results := discoverWorkspaces(cookie)
-
-	if len(results) == 0 {
+	// If workspace is specified, try to get token from that specific workspace
+	if workspace != "" {
+		result := tryExtractToken(cookie, fmt.Sprintf("https://%s.slack.com/", workspace), workspace)
+		if result != nil {
+			return []ImportResult{*result}, nil
+		}
+		// Token extraction failed — save cookie-only so user can add token manually
 		return []ImportResult{{
-			Cookie: cookie,
-			Error:  "cookie extracted but no workspaces discovered. Use 'slackogo auth manual' with this cookie",
+			Cookie:     cookie,
+			Workspace:  workspace,
+			CookieOnly: true,
+			Error:      fmt.Sprintf("cookie saved for %s but could not auto-extract token. Add token with: slackogo auth manual --token <TOKEN> --cookie '<COOKIE>' %s", workspace, workspace),
 		}}, nil
 	}
 
-	return results, nil
+	// No workspace specified — try the standard signin flow
+	// Step 1: Try slack.com/signin (works for simple workspaces)
+	result := tryExtractToken(cookie, "https://slack.com/signin", "")
+	if result != nil {
+		return []ImportResult{*result}, nil
+	}
+
+	// All auto-extraction failed — return cookie for manual use
+	return []ImportResult{{
+		Cookie: cookie,
+		Error:  "cookie extracted but could not auto-discover workspace. Use --workspace flag or add credentials manually",
+	}}, nil
 }
 
 var (
 	tokenRegex      = regexp.MustCompile(`"api_token"\s*:\s*"(xoxc-[^"]+)"`)
 	teamDomainRegex = regexp.MustCompile(`"team_url"\s*:\s*"https://([^.]+)\.slack\.com/"`)
 	teamNameRegex   = regexp.MustCompile(`"name"\s*:\s*"([^"]+)"`)
-	// Match multiple teams in boot data (enterprise grid users have multiple)
-	allTokensRegex  = regexp.MustCompile(`"api_token"\s*:\s*"(xoxc-[^"]+)"`)
-	allDomainsRegex = regexp.MustCompile(`"domain"\s*:\s*"([^"]+)"`)
 )
 
 func setEdgeHeaders(req *http.Request, cookie string) {
@@ -93,36 +111,7 @@ func setEdgeHeaders(req *http.Request, cookie string) {
 	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
 }
 
-// discoverWorkspaces uses a single page navigation to slack.com (just like
-// opening Slack in a browser tab) to extract workspace info and tokens.
-// This avoids calling any API endpoints directly which could trigger
-// Enterprise Grid security alerts.
-func discoverWorkspaces(cookie string) []ImportResult {
-	client := &http.Client{
-		Timeout: 20 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			// Carry cookie + headers through redirects like a real browser
-			setEdgeHeaders(req, cookie)
-			req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-			req.Header.Set("Sec-Fetch-Dest", "document")
-			req.Header.Set("Sec-Fetch-Mode", "navigate")
-			req.Header.Set("Sec-Fetch-Site", "none")
-			req.Header.Set("Sec-Fetch-User", "?1")
-			return nil
-		},
-	}
-
-	// Single navigation to slack.com/signin — this is exactly what happens
-	// when a user clicks their Slack bookmark. The server redirects to the
-	// correct workspace and serves boot data with the token embedded.
-	req, err := http.NewRequest("GET", "https://slack.com/signin", nil)
-	if err != nil {
-		return nil
-	}
-	setEdgeHeaders(req, cookie)
+func setNavigationHeaders(req *http.Request) {
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
 	req.Header.Set("Sec-Fetch-Dest", "document")
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
@@ -130,6 +119,27 @@ func discoverWorkspaces(cookie string) []ImportResult {
 	req.Header.Set("Sec-Fetch-User", "?1")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 	req.Header.Set("Cache-Control", "max-age=0")
+}
+
+func tryExtractToken(cookie, pageURL, workspace string) *ImportResult {
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			setEdgeHeaders(req, cookie)
+			setNavigationHeaders(req)
+			return nil
+		},
+	}
+
+	req, err := http.NewRequest("GET", pageURL, nil)
+	if err != nil {
+		return nil
+	}
+	setEdgeHeaders(req, cookie)
+	setNavigationHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -144,9 +154,6 @@ func discoverWorkspaces(cookie string) []ImportResult {
 
 	html := string(body)
 
-	// The final URL tells us which workspace we landed on
-	finalURL := resp.Request.URL.String()
-
 	// Extract token
 	tokenMatch := tokenRegex.FindStringSubmatch(html)
 	if tokenMatch == nil {
@@ -155,13 +162,18 @@ func discoverWorkspaces(cookie string) []ImportResult {
 
 	token := tokenMatch[1]
 
-	// Extract workspace domain — try from final URL first, then from boot data
-	workspace := ""
-	if strings.Contains(finalURL, ".slack.com") {
-		// Parse domain from final redirect URL (e.g. https://myteam.slack.com/...)
-		parts := strings.Split(resp.Request.URL.Hostname(), ".")
-		if len(parts) >= 3 && parts[len(parts)-2] == "slack" {
-			workspace = strings.Join(parts[:len(parts)-2], ".")
+	// Extract workspace domain from final URL or boot data
+	if workspace == "" || workspace == "app" {
+		// Try from redirect final URL
+		finalHost := resp.Request.URL.Hostname()
+		if strings.HasSuffix(finalHost, ".slack.com") {
+			parts := strings.Split(finalHost, ".")
+			if len(parts) >= 3 {
+				candidate := strings.Join(parts[:len(parts)-2], ".")
+				if candidate != "app" && candidate != "www" {
+					workspace = candidate
+				}
+			}
 		}
 	}
 	if workspace == "" || workspace == "app" {
@@ -170,16 +182,15 @@ func discoverWorkspaces(cookie string) []ImportResult {
 		}
 	}
 
-	// Extract team name
 	teamName := ""
 	if m := teamNameRegex.FindStringSubmatch(html); m != nil {
 		teamName = m[1]
 	}
 
-	return []ImportResult{{
+	return &ImportResult{
 		Cookie:    cookie,
 		Token:     token,
 		Workspace: workspace,
 		TeamName:  teamName,
-	}}
+	}
 }

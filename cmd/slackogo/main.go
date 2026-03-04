@@ -60,6 +60,7 @@ type AuthCmd struct {
 type AuthImportCmd struct {
 	Browser        string `help:"Browser to import from (chrome,edge,brave,firefox,safari)" default:"chrome" enum:"chrome,edge,brave,firefox,safari"`
 	BrowserProfile string `help:"Browser profile name" optional:""`
+	Workspace      string `help:"Workspace domain (e.g. myteam) for Enterprise Grid" optional:"" short:"W"`
 }
 
 type AuthManualCmd struct {
@@ -225,7 +226,7 @@ func main() {
 func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 	p := ctx.Printer
 	p.Human("Importing credentials from %s...", cmd.Browser)
-	results, err := auth.ImportFromBrowser(cmd.Browser, cmd.BrowserProfile)
+	results, err := auth.ImportFromBrowser(cmd.Browser, cmd.BrowserProfile, cmd.Workspace)
 	if err != nil {
 		return err
 	}
@@ -237,9 +238,26 @@ func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 			p.Human("  Cookie: %s", r.Cookie)
 		}
 
+		// CookieOnly: save the cookie without token, user adds token manually
+		if r.CookieOnly && r.Workspace != "" {
+			cred := auth.Credentials{
+				Cookie:    r.Cookie,
+				Workspace: r.Workspace,
+			}
+			_ = auth.AddOrUpdateCredentials(cred)
+			p.Success("✓ Cookie saved for %s", r.Workspace)
+			if r.Error != "" {
+				p.Human("  %s", r.Error)
+			}
+			if !ctx.Verbose && r.Cookie != "" {
+				p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
+			}
+			saved++
+			continue
+		}
+
 		if r.Error != "" {
 			p.Error("  %s", r.Error)
-			// Still show cookie for manual use even on error
 			if !ctx.Verbose && r.Cookie != "" {
 				p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
 				p.Human("  Use: slackogo auth manual --token <TOKEN> --cookie '<COOKIE>' <WORKSPACE>")
