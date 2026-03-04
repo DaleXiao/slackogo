@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/DaleXiao/slackogo/internal/auth"
-	"github.com/DaleXiao/slackogo/internal/transport"
 )
 
 type Client struct {
@@ -22,12 +21,9 @@ type Client struct {
 func NewClient(creds *auth.Credentials, timeout time.Duration) *Client {
 	base := fmt.Sprintf("https://%s.slack.com/api/", creds.Workspace)
 	return &Client{
-		HTTPClient: &http.Client{
-			Timeout:   timeout,
-			Transport: transport.NewEdgeTransport(),
-		},
-		Creds:   creds,
-		BaseURL: base,
+		HTTPClient: &http.Client{Timeout: timeout},
+		Creds:      creds,
+		BaseURL:    base,
 	}
 }
 
