@@ -7,6 +7,7 @@
 Power CLI using web cookies. Read channels, send messages, search, and script with JSON/plain output.
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -37,19 +38,28 @@ AI Agent (Claude, GPT, etc.)
 
 ## Install
 
-### From source (recommended)
+### Go
 
 ```bash
+# From source
 git clone https://github.com/DaleXiao/slacko.git
 cd slacko
 go build ./cmd/slacko/
-```
 
-### Go install
-
-```bash
+# Or via go install
 go install github.com/DaleXiao/slacko/cmd/slacko@latest
 ```
+
+### Node.js
+
+```bash
+git clone https://github.com/DaleXiao/slacko.git
+cd slacko/node
+npm install
+npm link    # makes 'slacko' available globally
+```
+
+Both implementations share the same credential store (`~/.config/slacko/`) and have identical command interfaces.
 
 ## Quick Start
 
@@ -165,6 +175,20 @@ Respects `NO_COLOR` and `TERM=dumb`.
 Slack's web client authenticates with an `xoxc-` token paired with a `d` cookie. slacko reuses these credentials to call the same Web API endpoints that `app.slack.com` uses — no OAuth, no bot tokens, no admin approval.
 
 Credentials are stored locally in `~/.config/slacko/`.
+
+## Project Structure
+
+```
+slacko/
+├── cmd/slacko/          # Go CLI entry point
+├── internal/            # Go packages (api, auth, output, app)
+├── node/                # Node.js implementation
+│   ├── bin/slacko.js    # CLI entry point (commander)
+│   └── lib/             # client, auth, output modules
+├── .gitignore
+├── LICENSE
+└── README.md
+```
 
 ## Security
 
