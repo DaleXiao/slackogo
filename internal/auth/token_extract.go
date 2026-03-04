@@ -2,7 +2,9 @@ package auth
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -20,6 +22,26 @@ func ExtractTokenFromBrowser(browser string) (token string, err error) {
 	}
 }
 
+// JS to extract all xoxc- tokens. Uses ONLY single quotes — no double quotes.
+// Priority: script tag boot_data first (workspace-level), then globals, then localStorage.
+const extractJS = `(function(){
+var r=[];
+var s=document.querySelectorAll('script');
+for(var i=0;i<s.length;i++){
+var m=s[i].textContent.match(/'api_token'\s*:\s*'(xoxc-[^']+)'/);
+if(!m) m=s[i].textContent.match(/"api_token"\s*:\s*"(xoxc-[^"]+)"/);
+if(m) r.push(m[1]);
+}
+if(typeof boot_data!=='undefined'&&boot_data.api_token) r.push(boot_data.api_token);
+if(typeof TS!=='undefined'&&TS.boot_data&&TS.boot_data.api_token) r.push(TS.boot_data.api_token);
+for(var j=0;j<localStorage.length;j++){
+var v=localStorage.getItem(localStorage.key(j));
+if(v&&v.indexOf('xoxc-')===0) r.push(v);
+try{var o=JSON.parse(v);if(o&&o.token&&o.token.indexOf('xoxc-')===0) r.push(o.token);}catch(e){}
+}
+return[...new Set(r)].join('\n');
+})()`
+
 func extractTokenMacOS(browser string) (string, error) {
 	appName := ""
 	switch strings.ToLower(browser) {
@@ -33,31 +55,22 @@ func extractTokenMacOS(browser string) (string, error) {
 		return "", fmt.Errorf("AppleScript token extraction supports: chrome, edge, brave (got %q)", browser)
 	}
 
-	// JS that extracts ALL xoxc- tokens from localStorage, separated by newlines.
-	// The caller will filter for workspace-level token (T-prefix team_id) via auth.test.
-	//
-	// Priority: boot_data script tags first, then localStorage.
-	// In Enterprise Grid, localStorage may have both enterprise (E-prefix) and
-	// workspace (T-prefix) tokens. We return all candidates and let the caller pick.
-	js := `(function(){var r=[];` +
-		`var s=document.querySelectorAll('script');` +
-		`for(var i=0;i<s.length;i++){` +
-		`var m=s[i].textContent.match(/\"api_token\"\\s*:\\s*\"(xoxc-[^\"]+)\"/);` +
-		`if(m)r.push(m[1])}` +
-		`if(typeof boot_data!=='undefined'&&boot_data.api_token&&boot_data.api_token.indexOf('xoxc-')===0)r.push(boot_data.api_token);` +
-		`if(typeof TS!=='undefined'&&TS.boot_data&&TS.boot_data.api_token&&TS.boot_data.api_token.indexOf('xoxc-')===0)r.push(TS.boot_data.api_token);` +
-		`for(var j=0;j<localStorage.length;j++){` +
-		`var v=localStorage.getItem(localStorage.key(j));` +
-		`if(v&&v.indexOf('xoxc-')===0)r.push(v);` +
-		`try{var o=JSON.parse(v);if(o&&o.token&&o.token.indexOf('xoxc-')===0)r.push(o.token)}catch(e){}}` +
-		`return[...new Set(r)].join('\\n')})()`
+	// Write JS to a temp file to completely avoid AppleScript quote escaping issues
+	tmpDir := os.TempDir()
+	jsFile := filepath.Join(tmpDir, "slackogo_extract.js")
+	if err := os.WriteFile(jsFile, []byte(extractJS), 0600); err != nil {
+		return "", fmt.Errorf("failed to write temp JS file: %w", err)
+	}
+	defer os.Remove(jsFile)
 
-	script := fmt.Sprintf(`tell application "%s"
+	// AppleScript reads JS from the temp file — no embedded quotes at all
+	script := fmt.Sprintf(`set jsCode to read POSIX file "%s"
+tell application "%s"
 	set tokenResult to "NOT_FOUND"
 	repeat with w in every window
 		repeat with t in every tab of w
 			if URL of t contains ".slack.com" then
-				set tokenResult to (execute t javascript "%s")
+				set tokenResult to (execute t javascript jsCode)
 				if tokenResult contains "xoxc-" then
 					return tokenResult
 				end if
@@ -65,7 +78,7 @@ func extractTokenMacOS(browser string) (string, error) {
 		end repeat
 	end repeat
 	return tokenResult
-end tell`, appName, strings.ReplaceAll(js, `"`, `\"`))
+end tell`, jsFile, appName)
 
 	cmd := exec.Command("osascript", "-e", script)
 	out, err := cmd.CombinedOutput()
@@ -79,7 +92,6 @@ end tell`, appName, strings.ReplaceAll(js, `"`, `\"`))
 		return "", fmt.Errorf("no xoxc- token found in %s Slack tabs. Make sure your Slack workspace is fully loaded", appName)
 	}
 
-	// Return all tokens newline-separated — caller filters via auth.test
 	return result, nil
 }
 
@@ -94,37 +106,35 @@ func extractTokenWindows(browser string) (string, error) {
 		return "", fmt.Errorf("PowerShell token extraction supports: chrome, edge (got %q)", browser)
 	}
 
-	js := `(function(){var r=[];` +
-		`var s=document.querySelectorAll('script');` +
-		`for(var i=0;i<s.length;i++){` +
-		`var m=s[i].textContent.match(/\"api_token\"\\s*:\\s*\"(xoxc-[^\"]+)\"/);` +
-		`if(m)r.push(m[1])}` +
-		`if(typeof boot_data!=='undefined'&&boot_data.api_token&&boot_data.api_token.indexOf('xoxc-')===0)r.push(boot_data.api_token);` +
-		`if(typeof TS!=='undefined'&&TS.boot_data&&TS.boot_data.api_token&&TS.boot_data.api_token.indexOf('xoxc-')===0)r.push(TS.boot_data.api_token);` +
-		`for(var j=0;j<localStorage.length;j++){` +
-		`var v=localStorage.getItem(localStorage.key(j));` +
-		`if(v&&v.indexOf('xoxc-')===0)r.push(v);` +
-		`try{var o=JSON.parse(v);if(o&&o.token&&o.token.indexOf('xoxc-')===0)r.push(o.token)}catch(e){}}` +
-		`return[...new Set(r)].join('\\n')})()`
+	// Write JS to temp file
+	tmpDir := os.TempDir()
+	jsFile := filepath.Join(tmpDir, "slackogo_extract.js")
+	if err := os.WriteFile(jsFile, []byte(extractJS), 0600); err != nil {
+		return "", fmt.Errorf("failed to write temp JS file: %w", err)
+	}
+	defer os.Remove(jsFile)
 
-	psScript := fmt.Sprintf(`
-Add-Type -AssemblyName System.Windows.Forms
-$proc = Get-Process -Name "%s" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne "" } | Select-Object -First 1
-if (-not $proc) { Write-Output "BROWSER_NOT_FOUND"; exit }
-$sig = '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);'
-$type = Add-Type -MemberDefinition $sig -Name Win32 -Namespace Native -PassThru
-$type::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
-Start-Sleep -Milliseconds 500
-[System.Windows.Forms.SendKeys]::SendWait("^+j")
-Start-Sleep -Milliseconds 1000
-$escaped = '%s' -replace '[+^%%~(){}]', '{$0}'
-[System.Windows.Forms.SendKeys]::SendWait("copy($escaped){ENTER}")
-Start-Sleep -Milliseconds 500
-[System.Windows.Forms.SendKeys]::SendWait("{F12}")
-Start-Sleep -Milliseconds 300
-$result = [System.Windows.Forms.Clipboard]::GetText()
-Write-Output $result
-`, exeName, strings.ReplaceAll(js, "'", "''"))
+	// PowerShell: activate browser, open console, run JS via file, read clipboard
+	psScript := fmt.Sprintf("\n"+
+		"Add-Type -AssemblyName System.Windows.Forms\n"+
+		"$proc = Get-Process -Name \"%s\" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne \"\" } | Select-Object -First 1\n"+
+		"if (-not $proc) { Write-Output \"BROWSER_NOT_FOUND\"; exit }\n"+
+		"$sig = '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);'\n"+
+		"$type = Add-Type -MemberDefinition $sig -Name Win32 -Namespace Native -PassThru\n"+
+		"$type::SetForegroundWindow($proc.MainWindowHandle) | Out-Null\n"+
+		"Start-Sleep -Milliseconds 500\n"+
+		"[System.Windows.Forms.SendKeys]::SendWait(\"^+j\")\n"+
+		"Start-Sleep -Milliseconds 1000\n"+
+		"$js = Get-Content -Raw \"%s\"\n"+
+		"$js = $js -replace \"`n\", \" \"\n"+
+		"$escaped = \"copy(\" + $js + \")\"\n"+
+		"[System.Windows.Forms.SendKeys]::SendWait($escaped + \"{ENTER}\")\n"+
+		"Start-Sleep -Milliseconds 500\n"+
+		"[System.Windows.Forms.SendKeys]::SendWait(\"{F12}\")\n"+
+		"Start-Sleep -Milliseconds 300\n"+
+		"$result = [System.Windows.Forms.Clipboard]::GetText()\n"+
+		"Write-Output $result\n",
+		exeName, strings.ReplaceAll(jsFile, `\`, `\\`))
 
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psScript)
 	out, err := cmd.CombinedOutput()
