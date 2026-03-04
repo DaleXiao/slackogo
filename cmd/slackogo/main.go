@@ -230,15 +230,33 @@ func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 		return err
 	}
 
+	saved := 0
 	for _, r := range results {
+		// Always show cookie in verbose mode
+		if ctx.Verbose && r.Cookie != "" {
+			p.Human("  Cookie: %s", r.Cookie)
+		}
+
 		if r.Error != "" {
 			p.Error("  %s", r.Error)
+			// Still show cookie for manual use even on error
+			if !ctx.Verbose && r.Cookie != "" {
+				p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
+				p.Human("  Use: slackogo auth manual --token <TOKEN> --cookie '<COOKIE>' <WORKSPACE>")
+			}
 			continue
 		}
 		if r.Token == "" {
 			p.Human("  Cookie found but could not extract token automatically.")
+			if !ctx.Verbose && r.Cookie != "" {
+				p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
+			}
 			p.Human("  Use: slackogo auth manual --token <TOKEN> --cookie '<COOKIE>' <WORKSPACE>")
 			continue
+		}
+
+		if ctx.Verbose {
+			p.Human("  Token: %s...%s", r.Token[:15], r.Token[len(r.Token)-4:])
 		}
 
 		cred := auth.Credentials{
@@ -256,9 +274,10 @@ func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 			name = fmt.Sprintf("%s (%s)", r.TeamName, r.Workspace)
 		}
 		p.Success("✓ Imported: %s", name)
+		saved++
 	}
 
-	if len(results) > 0 && results[0].Token != "" {
+	if saved > 0 {
 		p.Human("\nVerify with: slackogo auth status")
 	}
 	return nil

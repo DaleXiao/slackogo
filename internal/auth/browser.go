@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -21,8 +23,16 @@ var supportedBrowsers = map[string]sweetcookie.Browser{
 	"safari":  sweetcookie.BrowserSafari,
 }
 
-// ImportFromBrowser extracts the d cookie and xoxc- token from a browser's cookie store.
-// Returns (cookie, token, workspaces found, error).
+// ImportResult holds the result of importing credentials for one workspace
+type ImportResult struct {
+	Cookie    string
+	Token     string
+	Workspace string
+	TeamName  string
+	Error     string
+}
+
+// ImportFromBrowser extracts the d cookie and xoxc- tokens from a browser's cookie store.
 func ImportFromBrowser(browser, browserProfile string) ([]ImportResult, error) {
 	browser = strings.ToLower(browser)
 
@@ -54,100 +64,180 @@ func ImportFromBrowser(browser, browserProfile string) ([]ImportResult, error) {
 	cookie := res.Cookies[0].Value
 
 	// Discover workspaces and extract tokens
-	results, err := discoverWorkspaces(cookie)
-	if err != nil {
-		// Return cookie even if token extraction fails — user can still use manual token entry
-		return []ImportResult{{Cookie: cookie, Error: fmt.Sprintf("cookie found but token extraction failed: %v", err)}}, nil
+	results := discoverWorkspaces(cookie)
+
+	// If nothing found at all, still return the cookie so user can use it manually
+	if len(results) == 0 {
+		return []ImportResult{{
+			Cookie: cookie,
+			Error:  "cookie extracted but no workspaces discovered. Use 'slackogo auth manual' with this cookie",
+		}}, nil
 	}
 
 	return results, nil
 }
 
-// ImportResult holds the result of importing credentials for one workspace
-type ImportResult struct {
-	Cookie    string
-	Token     string
-	Workspace string
-	TeamName  string
-	Error     string
-}
-
 var (
-	tokenRegex     = regexp.MustCompile(`"api_token"\s*:\s*"(xoxc-[^"]+)"`)
-	teamDomainRegex = regexp.MustCompile(`"team_url"\s*:\s*"https://([^.]+)\.slack\.com/"`)
-	teamNameRegex  = regexp.MustCompile(`"name"\s*:\s*"([^"]+)"`)
+	tokenRegex = regexp.MustCompile(`"api_token"\s*:\s*"(xoxc-[^"]+)"`)
 )
 
-// discoverWorkspaces fetches the Slack page to find all workspaces and their tokens
-func discoverWorkspaces(cookie string) ([]ImportResult, error) {
-	client := &http.Client{
+type teamsResponse struct {
+	OK    bool `json:"ok"`
+	Teams []struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Domain string `json:"domain"`
+		URL    string `json:"url"`
+	} `json:"teams"`
+	Error string `json:"error,omitempty"`
+}
+
+func newHTTPClient(cookie string) *http.Client {
+	return &http.Client{
 		Timeout: 15 * time.Second,
-		// Don't follow redirects — we want to read the boot data page
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
+			if len(via) >= 5 {
 				return fmt.Errorf("too many redirects")
 			}
-			// Carry the cookie through redirects
 			req.Header.Set("Cookie", "d="+cookie)
 			return nil
 		},
 	}
+}
 
-	// First try the main slack.com page which may list workspaces
-	req, err := http.NewRequest("GET", "https://app.slack.com/", nil)
-	if err != nil {
-		return nil, err
-	}
+func setEdgeHeaders(req *http.Request, cookie string) {
 	req.Header.Set("Cookie", "d="+cookie)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "none")
 	req.Header.Set("Sec-Ch-Ua", `"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
 	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
 	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+}
+
+// discoverWorkspaces finds all workspaces the user belongs to and extracts tokens
+func discoverWorkspaces(cookie string) []ImportResult {
+	client := newHTTPClient(cookie)
+
+	// Step 1: Call auth.teams to discover all workspaces dynamically
+	teams, err := fetchTeams(client, cookie)
+	if err != nil || len(teams) == 0 {
+		// Fallback: try slack.com directly and parse boot data
+		result := tryExtractFromPage(client, cookie, "https://slack.com/ssb/redirect", "", "")
+		if result != nil {
+			return []ImportResult{*result}
+		}
+		return nil
+	}
+
+	// Step 2: For each workspace, load its page to extract the xoxc- token
+	var results []ImportResult
+	for _, team := range teams {
+		pageURL := fmt.Sprintf("https://%s.slack.com/", team.Domain)
+		result := tryExtractFromPage(client, cookie, pageURL, team.Domain, team.Name)
+		if result != nil {
+			results = append(results, *result)
+		} else {
+			results = append(results, ImportResult{
+				Cookie:    cookie,
+				Workspace: team.Domain,
+				TeamName:  team.Name,
+				Error:     fmt.Sprintf("cookie valid but could not extract token for %s", team.Domain),
+			})
+		}
+	}
+
+	return results
+}
+
+func fetchTeams(client *http.Client, cookie string) ([]struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Domain string `json:"domain"`
+	URL    string `json:"url"`
+}, error) {
+	params := url.Values{}
+	// auth.teams doesn't need a token, just the cookie
+
+	req, err := http.NewRequest("POST", "https://slack.com/api/auth.teams", strings.NewReader(params.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	setEdgeHeaders(req, cookie)
+	req.Header.Set("Origin", "https://slack.com")
+	req.Header.Set("Referer", "https://slack.com/")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("network error: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read error: %w", err)
+		return nil, err
+	}
+
+	var tr teamsResponse
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return nil, err
+	}
+	if !tr.OK {
+		return nil, fmt.Errorf("auth.teams failed: %s", tr.Error)
+	}
+
+	return tr.Teams, nil
+}
+
+func tryExtractFromPage(client *http.Client, cookie, pageURL, workspace, teamName string) *ImportResult {
+	req, err := http.NewRequest("GET", pageURL, nil)
+	if err != nil {
+		return nil
+	}
+	setEdgeHeaders(req, cookie)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
 	}
 
 	html := string(body)
-
-	// Extract token from boot data
 	tokenMatch := tokenRegex.FindStringSubmatch(html)
 	if tokenMatch == nil {
-		return nil, fmt.Errorf("could not find xoxc- token in page. The cookie may be invalid or expired")
+		return nil
 	}
 
-	token := tokenMatch[1]
-
-	// Extract workspace domain
-	workspace := ""
-	domainMatch := teamDomainRegex.FindStringSubmatch(html)
-	if domainMatch != nil {
-		workspace = domainMatch[1]
+	// Try to extract workspace from page if not provided
+	if workspace == "" {
+		teamDomainRegex := regexp.MustCompile(`"team_url"\s*:\s*"https://([^.]+)\.slack\.com/"`)
+		if m := teamDomainRegex.FindStringSubmatch(html); m != nil {
+			workspace = m[1]
+		}
+	}
+	if teamName == "" {
+		teamNameRegex := regexp.MustCompile(`"name"\s*:\s*"([^"]+)"`)
+		if m := teamNameRegex.FindStringSubmatch(html); m != nil {
+			teamName = m[1]
+		}
 	}
 
-	// Extract team name
-	teamName := ""
-	nameMatch := teamNameRegex.FindStringSubmatch(html)
-	if nameMatch != nil {
-		teamName = nameMatch[1]
-	}
-
-	return []ImportResult{{
+	return &ImportResult{
 		Cookie:    cookie,
-		Token:     token,
+		Token:     tokenMatch[1],
 		Workspace: workspace,
 		TeamName:  teamName,
-	}}, nil
+	}
 }
