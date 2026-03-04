@@ -225,79 +225,43 @@ func main() {
 
 func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 	p := ctx.Printer
-	p.Human("Importing credentials from %s...", cmd.Browser)
+	p.Human("Extracting cookie from %s (local only, no network requests)...", cmd.Browser)
 	results, err := auth.ImportFromBrowser(cmd.Browser, cmd.BrowserProfile, cmd.Target)
 	if err != nil {
 		return err
 	}
 
-	saved := 0
 	for _, r := range results {
-		// Always show cookie in verbose mode
 		if ctx.Verbose && r.Cookie != "" {
 			p.Human("  Cookie: %s", r.Cookie)
 		}
 
-		// CookieOnly: save the cookie without token, user adds token manually
-		if r.CookieOnly && r.Workspace != "" {
+		if r.Workspace != "" {
 			cred := auth.Credentials{
 				Cookie:    r.Cookie,
 				Workspace: r.Workspace,
 			}
 			_ = auth.AddOrUpdateCredentials(cred)
-			p.Success("✓ Cookie saved for %s", r.Workspace)
-			if r.Error != "" {
-				p.Human("  %s", r.Error)
-			}
-			if !ctx.Verbose && r.Cookie != "" {
-				p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
-			}
-			saved++
-			continue
+			p.Success("✓ Cookie saved for workspace: %s", r.Workspace)
+		} else {
+			p.Success("✓ Cookie extracted")
 		}
 
-		if r.Error != "" {
-			p.Error("  %s", r.Error)
-			if !ctx.Verbose && r.Cookie != "" {
-				p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
-				p.Human("  Use: slackogo auth manual --token <TOKEN> --cookie '<COOKIE>' <WORKSPACE>")
-			}
-			continue
-		}
-		if r.Token == "" {
-			p.Human("  Cookie found but could not extract token automatically.")
-			if !ctx.Verbose && r.Cookie != "" {
-				p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
-			}
-			p.Human("  Use: slackogo auth manual --token <TOKEN> --cookie '<COOKIE>' <WORKSPACE>")
-			continue
+		if !ctx.Verbose && r.Cookie != "" {
+			p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
 		}
 
-		if ctx.Verbose {
-			p.Human("  Token: %s...%s", r.Token[:15], r.Token[len(r.Token)-4:])
+		p.Human("")
+		p.Human("Next step — add your xoxc- token:")
+		if r.Workspace != "" {
+			p.Human("  slackogo auth manual --token xoxc-YOUR-TOKEN %s", r.Workspace)
+		} else {
+			p.Human("  slackogo auth manual --token xoxc-YOUR-TOKEN --cookie '%s' WORKSPACE", r.Cookie)
 		}
-
-		cred := auth.Credentials{
-			Token:     r.Token,
-			Cookie:    r.Cookie,
-			Workspace: r.Workspace,
-		}
-		if err := auth.AddOrUpdateCredentials(cred); err != nil {
-			p.Error("  Failed to save credentials for %s: %v", r.Workspace, err)
-			continue
-		}
-
-		name := r.Workspace
-		if r.TeamName != "" {
-			name = fmt.Sprintf("%s (%s)", r.TeamName, r.Workspace)
-		}
-		p.Success("✓ Imported: %s", name)
-		saved++
+		p.Human("")
+		p.Human("To find the token: open Slack in browser → F12 → Network → filter 'api/' → any request → Form Data → 'token'")
 	}
 
-	if saved > 0 {
-		p.Human("\nVerify with: slackogo auth status")
-	}
 	return nil
 }
 
