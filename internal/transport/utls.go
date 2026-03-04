@@ -2,36 +2,37 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 
-	tls "github.com/refraction-networking/utls"
+	utls "github.com/refraction-networking/utls"
 )
 
 // NewEdgeTransport returns an http.Transport that mimics Microsoft Edge's
-// TLS ClientHello fingerprint. This prevents Enterprise Grid security
-// systems from detecting non-browser TLS connections (JA3/JA4 mismatch).
+// TLS ClientHello fingerprint via utls.
+//
+// Uses HTTP/1.1 only — utls DialTLSContext is not compatible with Go's
+// built-in HTTP/2 transport (causes EOF errors). HTTP/1.1 is fine for
+// Slack API calls and page loads.
 func NewEdgeTransport() *http.Transport {
 	return &http.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Separate host:port
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
 				host = addr
 			}
 
-			// Dial TCP
 			dialer := &net.Dialer{}
 			conn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, fmt.Errorf("tcp dial: %w", err)
 			}
 
-			// Wrap with uTLS using Chrome fingerprint (Edge = Chromium-based, same TLS)
-			tlsConn := tls.UClient(conn, &tls.Config{
+			tlsConn := utls.UClient(conn, &utls.Config{
 				ServerName: host,
-			}, tls.HelloChrome_Auto)
+			}, utls.HelloChrome_Auto)
 
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				conn.Close()
@@ -40,6 +41,8 @@ func NewEdgeTransport() *http.Transport {
 
 			return tlsConn, nil
 		},
-		ForceAttemptHTTP2: true,
+		// Explicitly disable HTTP/2 — utls + Go http2 causes EOF
+		TLSClientConfig:   &tls.Config{},
+		ForceAttemptHTTP2: false,
 	}
 }

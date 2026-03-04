@@ -69,31 +69,50 @@ func ImportFromBrowser(browser, browserProfile, workspace string) ([]ImportResul
 	cookie := res.Cookies[0].Value
 
 	// If workspace is specified, try to get token from that specific workspace
+	var lastErr string
+
 	if workspace != "" {
-		result := tryExtractToken(cookie, fmt.Sprintf("https://%s.slack.com/", workspace), workspace)
-		if result != nil {
-			return []ImportResult{*result}, nil
+		// Try multiple URL patterns for enterprise grid compatibility
+		urls := []string{
+			fmt.Sprintf("https://%s.slack.com/", workspace),
+			fmt.Sprintf("https://%s.enterprise.slack.com/", workspace),
 		}
-		// Token extraction failed — save cookie-only so user can add token manually
+		for _, u := range urls {
+			result := tryExtractToken(cookie, u, workspace)
+			if result != nil && result.Token != "" {
+				return []ImportResult{*result}, nil
+			}
+			if result != nil && result.Error != "" {
+				lastErr = result.Error
+			}
+		}
+		// Token extraction failed — save cookie-only
+		msg := fmt.Sprintf("cookie saved for %s. Add token manually: slackogo auth manual --token <TOKEN> --cookie '<COOKIE>' %s", workspace, workspace)
+		if lastErr != "" {
+			msg = fmt.Sprintf("cookie saved for %s. Token auto-extract failed: %s", workspace, lastErr)
+		}
 		return []ImportResult{{
 			Cookie:     cookie,
 			Workspace:  workspace,
 			CookieOnly: true,
-			Error:      fmt.Sprintf("cookie saved for %s but could not auto-extract token. Add token with: slackogo auth manual --token <TOKEN> --cookie '<COOKIE>' %s", workspace, workspace),
+			Error:      msg,
 		}}, nil
 	}
 
 	// No workspace specified — try the standard signin flow
-	// Step 1: Try slack.com/signin (works for simple workspaces)
 	result := tryExtractToken(cookie, "https://slack.com/signin", "")
-	if result != nil {
+	if result != nil && result.Token != "" {
 		return []ImportResult{*result}, nil
 	}
 
-	// All auto-extraction failed — return cookie for manual use
+	errMsg := "cookie extracted but could not auto-discover workspace. Use --target flag or add credentials manually"
+	if result != nil && result.Error != "" {
+		errMsg = result.Error
+	}
+
 	return []ImportResult{{
 		Cookie: cookie,
-		Error:  "cookie extracted but could not auto-discover workspace. Use --workspace flag or add credentials manually",
+		Error:  errMsg,
 	}}, nil
 }
 
@@ -145,21 +164,39 @@ func tryExtractToken(cookie, pageURL, workspace string) *ImportResult {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil
+		return &ImportResult{
+			Cookie: cookie,
+			Workspace: workspace,
+			Error: fmt.Sprintf("HTTP request failed: %v", err),
+		}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil
+		return &ImportResult{
+			Cookie: cookie,
+			Workspace: workspace,
+			Error: fmt.Sprintf("failed to read response: %v", err),
+		}
 	}
 
 	html := string(body)
+	finalURL := resp.Request.URL.String()
 
 	// Extract token
 	tokenMatch := tokenRegex.FindStringSubmatch(html)
 	if tokenMatch == nil {
-		return nil
+		// Return diagnostic info instead of silent nil
+		snippet := html
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return &ImportResult{
+			Cookie:    cookie,
+			Workspace: workspace,
+			Error:     fmt.Sprintf("no xoxc- token found at %s (HTTP %d, final URL: %s, body preview: %s...)", pageURL, resp.StatusCode, finalURL, snippet),
+		}
 	}
 
 	token := tokenMatch[1]
