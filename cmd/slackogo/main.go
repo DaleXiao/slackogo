@@ -60,9 +60,8 @@ type AuthCmd struct {
 type AuthImportCmd struct {
 	Browser        string `help:"Browser to import from (chrome,edge,brave,firefox,safari)" default:"chrome" enum:"chrome,edge,brave,firefox,safari"`
 	BrowserProfile string `help:"Browser profile name" optional:""`
-	Target         string `help:"Target workspace domain (e.g. myteam) for Enterprise Grid" optional:"" name:"target" short:"t"`
-	CDPPort        int    `help:"CDP remote debugging port (default 9222)" optional:"" name:"cdp-port" default:"9222"`
-	NoCDP          bool   `help:"Skip CDP token extraction (cookie only)" optional:"" name:"no-cdp"`
+	Target         string `help:"Target workspace domain (e.g. myteam)" optional:"" name:"target" short:"t"`
+	CookieOnly     bool   `help:"Only extract cookie, skip token extraction" optional:"" name:"cookie-only"`
 }
 
 type AuthManualCmd struct {
@@ -241,30 +240,25 @@ func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 	}
 	p.Success("✓ Cookie extracted from %s", cmd.Browser)
 
-	// Step 2: Try CDP token extraction (unless --no-cdp)
+	// Step 2: Try token extraction via AppleScript/PowerShell (unless --cookie-only)
 	token := ""
-	cdpWorkspace := ""
-	if !cmd.NoCDP {
-		p.Human("Connecting to browser CDP on port %d...", cmd.CDPPort)
-		t, w, cdpErr := auth.ExtractTokenViaCDP(cmd.CDPPort)
-		if cdpErr != nil {
-			p.Human("  CDP token extraction failed: %v", cdpErr)
+	if !cmd.CookieOnly {
+		p.Human("Extracting token from %s browser tabs...", cmd.Browser)
+		t, jsErr := auth.ExtractTokenFromBrowser(cmd.Browser)
+		if jsErr != nil {
+			p.Human("  Token extraction failed: %v", jsErr)
 			p.Human("  Falling back to manual token entry")
 		} else {
 			token = t
-			cdpWorkspace = w
 			if ctx.Verbose {
 				p.Human("  Token: %s...%s", token[:15], token[len(token)-4:])
 			}
-			p.Success("✓ Token extracted via CDP")
+			p.Success("✓ Token extracted from browser")
 		}
 	}
 
 	// Determine workspace
 	workspace := cmd.Target
-	if workspace == "" {
-		workspace = cdpWorkspace
-	}
 	if workspace == "" {
 		workspace = r.Workspace
 	}
