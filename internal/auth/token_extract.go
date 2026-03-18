@@ -1,12 +1,14 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // ExtractTokenFromBrowser uses AppleScript (macOS) or PowerShell (Windows)
@@ -64,23 +66,33 @@ func extractTokenMacOS(browser string) (string, error) {
 	defer os.Remove(jsFile)
 
 	// AppleScript reads JS from the temp file — no embedded quotes at all
+	// Uses 'with timeout' to prevent hanging on tabs that are loading/stuck.
+	// Returns as soon as the first tab yields a valid xoxc- token.
 	script := fmt.Sprintf(`set jsCode to read POSIX file "%s"
 tell application "%s"
 	set tokenResult to "NOT_FOUND"
 	repeat with w in every window
 		repeat with t in every tab of w
-			if URL of t contains ".slack.com" then
-				set tokenResult to (execute t javascript jsCode)
-				if tokenResult contains "xoxc-" then
-					return tokenResult
-				end if
-			end if
+			try
+				with timeout of 5 seconds
+					if URL of t contains ".slack.com" then
+						set tokenResult to (execute t javascript jsCode)
+						if tokenResult contains "xoxc-" then
+							return tokenResult
+						end if
+					end if
+				end timeout
+			on error
+				-- Tab timed out or failed, skip to next
+			end try
 		end repeat
 	end repeat
 	return tokenResult
 end tell`, jsFile, appName)
 
-	cmd := exec.Command("osascript", "-e", script)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		errMsg := strings.TrimSpace(string(out))
@@ -114,7 +126,8 @@ func extractTokenWindows(browser string) (string, error) {
 	}
 	defer os.Remove(jsFile)
 
-	// PowerShell: activate browser, open console, run JS via file, read clipboard
+	// PowerShell: activate browser, open console, run JS via file, read clipboard.
+	// Uses exec.CommandContext for timeout protection against hanging.
 	psScript := fmt.Sprintf("\n"+
 		"Add-Type -AssemblyName System.Windows.Forms\n"+
 		"$proc = Get-Process -Name \"%s\" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne \"\" } | Select-Object -First 1\n"+
@@ -136,7 +149,9 @@ func extractTokenWindows(browser string) (string, error) {
 		"Write-Output $result\n",
 		exeName, strings.ReplaceAll(jsFile, `\`, `\\`))
 
-	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psScript)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psScript)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		errMsg := strings.TrimSpace(string(out))
