@@ -3,6 +3,9 @@ package auth
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/steipete/sweetcookie"
@@ -58,7 +61,21 @@ func ImportFromBrowser(browser, browserProfile, workspace string) ([]ImportResul
 		Mode:     sweetcookie.ModeFirst,
 	}
 
+	// On Windows, Chromium browsers hold exclusive locks on the Cookies DB.
+	// Try the normal path first; if it fails on Windows, fall back to a
+	// shared-mode file copy snapshot.
 	res, err := sweetcookie.Get(context.Background(), opts)
+
+	if err != nil && runtime.GOOS == "windows" && isChromiumBrowser(browser) {
+		snapshotPath, cleanup, snapErr := snapshotWindowsCookies(scBrowser, browserProfile)
+		if snapErr == nil && snapshotPath != "" {
+			defer cleanup()
+			// Pass the snapshot Cookies file path as profile override
+			opts.Profiles = map[sweetcookie.Browser]string{scBrowser: snapshotPath}
+			res, err = sweetcookie.Get(context.Background(), opts)
+		}
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to read cookies from %s: %w", browser, err)
 	}
@@ -74,4 +91,70 @@ func ImportFromBrowser(browser, browserProfile, workspace string) ([]ImportResul
 		Workspace:  workspace,
 		CookieOnly: true,
 	}}, nil
+}
+
+// isChromiumBrowser returns true for browsers that use Chromium's SQLite cookie store.
+func isChromiumBrowser(browser string) bool {
+	switch browser {
+	case "chrome", "edge", "brave", "chromium", "vivaldi", "opera":
+		return true
+	}
+	return false
+}
+
+// snapshotWindowsCookies finds the Cookies DB for the given browser and
+// creates a shared-mode copy in a temp directory. Returns the path to the
+// copied Cookies file that can be used as sweetcookie's Profile override.
+func snapshotWindowsCookies(browser sweetcookie.Browser, profileOverride string) (string, func(), error) {
+	// Determine the Cookies DB path
+	cookiesPath, err := findChromiumCookiesDB(browser, profileOverride)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return prepareWindowsCookieSnapshot(cookiesPath)
+}
+
+// findChromiumCookiesDB locates the Cookies database file for a Chromium browser.
+func findChromiumCookiesDB(browser sweetcookie.Browser, profileOverride string) (string, error) {
+	localAppData := os.Getenv("LOCALAPPDATA")
+	appData := os.Getenv("APPDATA")
+
+	var userDataDir string
+	switch browser {
+	case sweetcookie.BrowserChrome:
+		userDataDir = filepath.Join(localAppData, "Google", "Chrome", "User Data")
+	case sweetcookie.BrowserEdge:
+		userDataDir = filepath.Join(localAppData, "Microsoft", "Edge", "User Data")
+	case sweetcookie.BrowserBrave:
+		userDataDir = filepath.Join(localAppData, "BraveSoftware", "Brave-Browser", "User Data")
+	default:
+		// Opera, etc
+		if appData != "" {
+			userDataDir = filepath.Join(appData, "Opera Software", "Opera Stable")
+		}
+	}
+
+	if userDataDir == "" {
+		return "", fmt.Errorf("cannot determine user data dir for %s", browser)
+	}
+
+	profile := "Default"
+	if profileOverride != "" {
+		profile = profileOverride
+	}
+
+	// Try Network/Cookies first (newer Chromium), then Cookies
+	candidates := []string{
+		filepath.Join(userDataDir, profile, "Network", "Cookies"),
+		filepath.Join(userDataDir, profile, "Cookies"),
+	}
+
+	for _, p := range candidates {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p, nil
+		}
+	}
+
+	return "", fmt.Errorf("cookies DB not found for %s (profile=%s)", browser, profile)
 }
