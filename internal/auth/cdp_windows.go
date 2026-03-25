@@ -176,33 +176,49 @@ func findOrCreateSlackTab(port, workspace string) (string, error) {
 		}
 	}
 
-	// No Slack tab found — navigate browser to Slack
+	// No Slack tab found — use an existing tab and navigate it to Slack
+	// (Edge doesn't support /json/new, returns 405)
 	slackURL := "https://app.slack.com/"
 	if workspace != "" {
 		slackURL = fmt.Sprintf("https://%s.slack.com/", workspace)
 	}
 
-	// Open new tab by hitting the /json/new endpoint
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/json/new?%s", port, slackURL))
+	// Find any page target to reuse
+	var reuseTarget *cdpTarget
+	for i := range targets {
+		if targets[i].Type == "page" && targets[i].WebSocketDebuggerURL != "" {
+			reuseTarget = &targets[i]
+			break
+		}
+	}
+	if reuseTarget == nil {
+		return "", fmt.Errorf("no page targets available to navigate")
+	}
+
+	// Navigate the tab to Slack via CDP Page.navigate
+	ws, err := websocket.Dial(reuseTarget.WebSocketDebuggerURL, "", "http://localhost")
 	if err != nil {
-		return "", fmt.Errorf("create new tab: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-
-	var newTarget cdpTarget
-	if err := json.Unmarshal(body, &newTarget); err != nil {
-		return "", fmt.Errorf("parse new tab response: %w", err)
+		return "", fmt.Errorf("websocket dial for navigate: %w", err)
 	}
 
-	if newTarget.WebSocketDebuggerURL == "" {
-		return "", fmt.Errorf("new tab has no WebSocket URL")
+	navReq := map[string]interface{}{
+		"id":     99,
+		"method": "Page.navigate",
+		"params": map[string]interface{}{
+			"url": slackURL,
+		},
 	}
+	navBytes, _ := json.Marshal(navReq)
+	if _, err := ws.Write(navBytes); err != nil {
+		ws.Close()
+		return "", fmt.Errorf("send Page.navigate: %w", err)
+	}
+	ws.Close()
 
-	// Wait for page to load
-	time.Sleep(3 * time.Second)
+	// Wait for Slack page to load
+	time.Sleep(5 * time.Second)
 
-	return newTarget.WebSocketDebuggerURL, nil
+	return reuseTarget.WebSocketDebuggerURL, nil
 }
 
 func listTargets(port string) ([]cdpTarget, error) {
