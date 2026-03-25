@@ -2,8 +2,14 @@
 
 package auth
 
-// cdpExtractCookie is a no-op on non-Windows platforms.
-// macOS doesn't use App-Bound Encryption.
-func cdpExtractCookie(cookieName, targetURL string) (string, error) {
-	return "", nil
+// CDPImportResult holds cookie + token extracted via CDP
+type CDPImportResult struct {
+	Cookie string
+	Token  string
+}
+
+// CDPImport is a no-op on non-Windows platforms.
+// macOS uses sweetcookie (Keychain) which handles decryption natively.
+func CDPImport(targetWorkspace string) (*CDPImportResult, error) {
+	return nil, nil
 }

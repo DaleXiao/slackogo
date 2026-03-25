@@ -228,8 +228,8 @@ func main() {
 func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 	p := ctx.Printer
 
-	// Step 1: Extract cookie from browser (local only, no network)
-	p.Human("Extracting cookie from %s (local only, no network requests)...", cmd.Browser)
+	// Step 1: Extract cookie (and possibly token) from browser
+	p.Human("Extracting credentials from %s...", cmd.Browser)
 	results, err := auth.ImportFromBrowser(cmd.Browser, cmd.BrowserProfile, cmd.Target)
 	if err != nil {
 		return err
@@ -241,9 +241,11 @@ func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 	}
 	p.Success("✓ Cookie extracted from %s", cmd.Browser)
 
-	// Step 2: Try token extraction via AppleScript/PowerShell (unless --cookie-only)
-	token := ""
-	if !cmd.CookieOnly {
+	// CDP on Windows may have already extracted the token
+	token := r.Token
+
+	// Step 2: If no token yet, try AppleScript/PowerShell extraction (unless --cookie-only)
+	if token == "" && !cmd.CookieOnly {
 		p.Human("Extracting token from %s browser tabs...", cmd.Browser)
 		rawTokens, jsErr := auth.ExtractTokenFromBrowser(cmd.Browser)
 		if jsErr != nil {
