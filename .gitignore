@@ -1,3 +1,4 @@
 slacko
 *.exe
 node/node_modules/
+dist/

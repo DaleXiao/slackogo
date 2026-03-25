@@ -86,6 +86,24 @@ func ImportFromBrowser(browser, browserProfile, workspace string) ([]ImportResul
 
 	cookie := res.Cookies[0].Value
 
+	// On Windows, check if the cookie value is empty (v20 App-Bound Encryption
+	// means sweetcookie can read the row but cannot decrypt the value).
+	// Fall back to CDP (Chrome DevTools Protocol) to let Edge decrypt it.
+	if cookie == "" && runtime.GOOS == "windows" && isChromiumBrowser(browser) {
+		cdpValue, cdpErr := cdpExtractCookie("d", "https://app.slack.com/")
+		if cdpErr == nil && cdpValue != "" {
+			cookie = cdpValue
+		} else {
+			hint := "v20 App-Bound Encryption detected and CDP fallback failed"
+			if cdpErr != nil {
+				hint += ": " + cdpErr.Error()
+			}
+			return nil, fmt.Errorf("%s. Try: slackogo auth manual --cookie <value> %s\n"+
+				"  To get the cookie: Edge → F12 → Application → Cookies → https://app.slack.com → copy 'd' value",
+				hint, workspace)
+		}
+	}
+
 	return []ImportResult{{
 		Cookie:     cookie,
 		Workspace:  workspace,
