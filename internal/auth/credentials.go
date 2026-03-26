@@ -69,15 +69,27 @@ func FindCredentials(workspace string) (*Credentials, error) {
 	if len(creds) == 0 {
 		return nil, fmt.Errorf("no credentials configured. Run 'slackogo auth manual' or 'slackogo auth import'")
 	}
+	var cred *Credentials
 	if workspace == "" {
-		return &creds[0], nil
-	}
-	for _, c := range creds {
-		if c.Workspace == workspace {
-			return &c, nil
+		cred = &creds[0]
+	} else {
+		for i, c := range creds {
+			if c.Workspace == workspace {
+				cred = &creds[i]
+				break
+			}
 		}
 	}
-	return nil, fmt.Errorf("no credentials for workspace %q", workspace)
+	if cred == nil {
+		return nil, fmt.Errorf("no credentials for workspace %q", workspace)
+	}
+	// Guard: refuse to use empty token — prevents silent auth failures,
+	// retry loops, and potential F2A lockouts from repeated bad requests.
+	if cred.Token == "" {
+		return nil, fmt.Errorf("auth error: token is empty for workspace %q. "+
+			"Run 'slackogo auth import' or 'slackogo auth manual' to set a valid xoxc- token", cred.Workspace)
+	}
+	return cred, nil
 }
 
 // AddOrUpdateCredentials upserts credentials by workspace

@@ -330,6 +330,14 @@ func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 		p.Human("\nNext step — add your xoxc- token:")
 		p.Human("  slackogo auth manual --token xoxc-YOUR-TOKEN %s", workspace)
 		p.Human("\nTo find the token: open Slack in browser → F12 → Network → filter 'api/' → any request → Form Data → 'token'")
+
+		// If user didn't explicitly request cookie-only, this is a failure:
+		// saving credentials without a token leads to silent auth errors,
+		// retry loops, and potential F2A lockouts.
+		if !cmd.CookieOnly {
+			return fmt.Errorf("auth error: token extraction failed. Cookie saved but token is missing — API calls will fail.\n" +
+				"  Fix: run 'slackogo auth manual --token xoxc-YOUR-TOKEN --cookie YOUR-COOKIE " + workspace + "'")
+		}
 	} else {
 		if !ctx.Verbose {
 			p.Human("  Cookie (first 30 chars): %s...", r.Cookie[:min(30, len(r.Cookie))])
@@ -393,7 +401,10 @@ func runAuthStatus(ctx *app.Context) error {
 	var plainRows [][]string
 
 	for _, c := range creds {
-		tokenPreview := c.Token[:min(15, len(c.Token))] + "..."
+		tokenPreview := "(empty)"
+		if len(c.Token) > 0 {
+			tokenPreview = c.Token[:min(15, len(c.Token))] + "..."
+		}
 		entries = append(entries, statusEntry{c.Workspace, tokenPreview, c.Cookie != ""})
 		plainRows = append(plainRows, []string{c.Workspace, tokenPreview, fmt.Sprintf("%v", c.Cookie != "")})
 	}
@@ -401,7 +412,10 @@ func runAuthStatus(ctx *app.Context) error {
 	return p.Auto(entries, plainRows, func() {
 		p.Header("Configured Workspaces")
 		for _, c := range creds {
-			tokenPreview := c.Token[:min(15, len(c.Token))] + "..."
+			tokenPreview := color.RedString("(empty)")
+			if len(c.Token) > 0 {
+				tokenPreview = c.Token[:min(15, len(c.Token))] + "..."
+			}
 			p.Human("  %s: token=%s cookie=%v", c.Workspace, tokenPreview, c.Cookie != "")
 		}
 	})
