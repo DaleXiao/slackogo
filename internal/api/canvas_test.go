@@ -49,13 +49,15 @@ func parseForm(t *testing.T, r *http.Request) url.Values {
 	return v
 }
 
-// --- list ---
+// --- list (SPEC-056: files.list?types=canvas) ---
 
 func TestCanvasesList_RequestParams(t *testing.T) {
 	var captured url.Values
+	var gotPath string
 	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
 		captured = parseForm(t, r)
-		_, _ = w.Write([]byte(`{"ok":true,"canvases":[{"id":"F123","title":"hi"}]}`))
+		_, _ = w.Write([]byte(`{"ok":true,"files":[{"id":"F123","filetype":"canvas","title":"hi","permalink":"https://x.slack.com/docs/F123","channels":["C42"],"user":"U1","created":1700000000,"updated":1700000100}],"paging":{"count":1,"total":1,"page":1,"pages":1}}`))
 	})
 	defer srv.Close()
 
@@ -63,17 +65,35 @@ func TestCanvasesList_RequestParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CanvasesList err: %v", err)
 	}
-	if got := captured.Get("channel_id"); got != "C42" {
-		t.Errorf("channel_id = %q, want C42", got)
+	// SPEC-056 ac #1: must call files.list with types=canvas
+	if gotPath != "/files.list" {
+		t.Errorf("path = %q, want /files.list", gotPath)
 	}
-	if got := captured.Get("limit"); got != "25" {
-		t.Errorf("limit = %q, want 25", got)
+	if got := captured.Get("types"); got != "canvas" {
+		t.Errorf("types = %q, want canvas", got)
+	}
+	if got := captured.Get("channel"); got != "C42" {
+		t.Errorf("channel = %q, want C42", got)
+	}
+	if got := captured.Get("count"); got != "25" {
+		t.Errorf("count = %q, want 25", got)
 	}
 	if got := captured.Get("token"); got != "xoxc-test" {
 		t.Errorf("token = %q, want xoxc-test", got)
 	}
-	if len(resp.Canvases) != 1 || resp.Canvases[0].ID != "F123" {
-		t.Errorf("canvases = %+v", resp.Canvases)
+	// SPEC-056 ac #2: response decoded from `files` array, mapped into CanvasInfo
+	if len(resp.Canvases) != 1 {
+		t.Fatalf("canvases = %+v", resp.Canvases)
+	}
+	cv := resp.Canvases[0]
+	if cv.ID != "F123" || cv.Title != "hi" || cv.OwnerID != "U1" || cv.ChannelID != "C42" {
+		t.Errorf("canvas mapping wrong: %+v", cv)
+	}
+	if cv.URL != "https://x.slack.com/docs/F123" {
+		t.Errorf("URL = %q (want permalink)", cv.URL)
+	}
+	if cv.DateCreated != 1700000000 || cv.DateUpdated != 1700000100 {
+		t.Errorf("timestamps = %d/%d", cv.DateCreated, cv.DateUpdated)
 	}
 }
 
@@ -81,18 +101,66 @@ func TestCanvasesList_OmitsEmptyChannel(t *testing.T) {
 	var captured url.Values
 	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
 		captured = parseForm(t, r)
-		_, _ = w.Write([]byte(`{"ok":true,"canvases":[]}`))
+		_, _ = w.Write([]byte(`{"ok":true,"files":[]}`))
 	})
 	defer srv.Close()
 
 	if _, err := c.CanvasesList("", 0); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if _, ok := captured["channel_id"]; ok {
-		t.Errorf("channel_id should be omitted when empty")
+	if _, ok := captured["channel"]; ok {
+		t.Errorf("channel should be omitted when empty")
 	}
-	if _, ok := captured["limit"]; ok {
-		t.Errorf("limit should be omitted when zero")
+	if _, ok := captured["count"]; ok {
+		t.Errorf("count should be omitted when zero")
+	}
+	// types=canvas always present
+	if captured.Get("types") != "canvas" {
+		t.Errorf("types must always be canvas, got %q", captured.Get("types"))
+	}
+}
+
+func TestCanvasesList_FiletypeFilter(t *testing.T) {
+	// Defensive client-side filetype filter: drop entries with filetype != canvas
+	// (in case server-side types= returns mixed results across API versions).
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"files":[
+			{"id":"F1","filetype":"canvas","title":"keep"},
+			{"id":"F2","filetype":"png","title":"drop"},
+			{"id":"F3","filetype":"","title":"keep_empty"},
+			{"id":"F4","filetype":"quip","title":"drop"}
+		]}`))
+	})
+	defer srv.Close()
+
+	resp, err := c.CanvasesList("", 0)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(resp.Canvases) != 2 {
+		t.Fatalf("want 2 canvases (F1+F3), got %d: %+v", len(resp.Canvases), resp.Canvases)
+	}
+	ids := []string{resp.Canvases[0].ID, resp.Canvases[1].ID}
+	if strings.Join(ids, ",") != "F1,F3" {
+		t.Errorf("ids = %v, want [F1 F3]", ids)
+	}
+}
+
+func TestCanvasesList_TitleFallbackToName(t *testing.T) {
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"files":[{"id":"F1","filetype":"canvas","title":"","name":"fallback-name","url_private":"https://x/private"}]}`))
+	})
+	defer srv.Close()
+
+	resp, err := c.CanvasesList("", 0)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp.Canvases[0].Title != "fallback-name" {
+		t.Errorf("title fallback failed: %q", resp.Canvases[0].Title)
+	}
+	if resp.Canvases[0].URL != "https://x/private" {
+		t.Errorf("url fallback to url_private failed: %q", resp.Canvases[0].URL)
 	}
 }
 

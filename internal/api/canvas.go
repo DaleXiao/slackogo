@@ -71,31 +71,98 @@ type CanvasSection struct {
 
 type CanvasesListResponse struct {
 	SlackResponse
-	Canvases         []CanvasInfo `json:"canvases"`
-	ResponseMetadata struct {
-		NextCursor string `json:"next_cursor"`
-	} `json:"response_metadata"`
+	Canvases []CanvasInfo `json:"canvases"`
+	Paging   struct {
+		Count int `json:"count"`
+		Total int `json:"total"`
+		Page  int `json:"page"`
+		Pages int `json:"pages"`
+	} `json:"paging"`
 }
 
-// CanvasesList lists canvases visible to the caller. channelID is optional;
-// when set, results are scoped to that channel.
+// filesListEntry mirrors the relevant fields of the files.list `files[]` array.
+// Slack returns a richer shape for files; we map the canvas-relevant fields
+// into CanvasInfo for the public surface.
+type filesListEntry struct {
+	ID         string   `json:"id"`
+	Filetype   string   `json:"filetype"`
+	Title      string   `json:"title"`
+	Name       string   `json:"name"`
+	User       string   `json:"user"`
+	Channels   []string `json:"channels"`
+	Permalink  string   `json:"permalink"`
+	URLPrivate string   `json:"url_private"`
+	Created    int64    `json:"created"`
+	Updated    int64    `json:"updated"`
+	Timestamp  int64    `json:"timestamp"`
+}
+
+type filesListResponse struct {
+	SlackResponse
+	Files  []filesListEntry `json:"files"`
+	Paging struct {
+		Count int `json:"count"`
+		Total int `json:"total"`
+		Page  int `json:"page"`
+		Pages int `json:"pages"`
+	} `json:"paging"`
+}
+
+// CanvasesList lists canvases visible to the caller via Slack's `files.list`
+// endpoint with `types=canvas`. Slack's `canvases.list` method does not
+// exist; per https://docs.slack.dev/surfaces/canvases/ canvases are surfaced
+// as files of type `canvas`.
+//
+// channelID is optional; when set, results are scoped to that channel
+// (server-side filter via `channel`).
 func (c *Client) CanvasesList(channelID string, limit int) (*CanvasesListResponse, error) {
 	params := url.Values{}
+	params.Set("types", "canvas")
 	if channelID != "" {
-		params.Set("channel_id", channelID)
+		params.Set("channel", channelID)
 	}
 	if limit > 0 {
-		params.Set("limit", fmt.Sprintf("%d", limit))
+		params.Set("count", fmt.Sprintf("%d", limit))
 	}
-	data, err := c.Post("canvases.list", params)
+	data, err := c.Post("files.list", params)
 	if err != nil {
 		return nil, err
 	}
-	var resp CanvasesListResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode canvases.list: %w", err)
+	var raw filesListResponse
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("decode files.list: %w", err)
 	}
-	return &resp, nil
+
+	resp := &CanvasesListResponse{SlackResponse: raw.SlackResponse, Paging: raw.Paging}
+	for _, f := range raw.Files {
+		// Defensive: server-side `types=canvas` should already filter, but
+		// double-check filetype to avoid surprises across API versions.
+		if f.Filetype != "" && f.Filetype != "canvas" {
+			continue
+		}
+		title := f.Title
+		if title == "" {
+			title = f.Name
+		}
+		u := f.Permalink
+		if u == "" {
+			u = f.URLPrivate
+		}
+		var ch string
+		if len(f.Channels) > 0 {
+			ch = f.Channels[0]
+		}
+		resp.Canvases = append(resp.Canvases, CanvasInfo{
+			ID:          f.ID,
+			Title:       title,
+			OwnerID:     f.User,
+			ChannelID:   ch,
+			URL:         u,
+			DateCreated: f.Created,
+			DateUpdated: f.Updated,
+		})
+	}
+	return resp, nil
 }
 
 // === Get ===

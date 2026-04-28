@@ -150,7 +150,7 @@ slackogo status                           # Connection status
 ### Canvases (SPEC-050)
 
 ```bash
-slackogo canvas list [--channel C123] [--limit 100]
+slackogo canvas list [--channel C123] [--limit 100]   # uses files.list?types=canvas
 slackogo canvas get CANVAS_ID [-o md|json|raw]
 slackogo canvas create --title "My doc" [--channel C123] [--from-file body.md] [--body "# inline"]
 slackogo canvas edit CANVAS_ID --op replace --section S1 --from-file new.md
