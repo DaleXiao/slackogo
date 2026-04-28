@@ -34,6 +34,7 @@ AI Agent (Claude, GPT, etc.)
 | Rate limits | Strict (tier 1-4) | Web client limits (generous) |
 | Internal channels | Need explicit permission | If you can see it, slackogo can too |
 | Enterprise Grid | Complex multi-workspace auth | Just import cookies per workspace |
+| Canvases | API requires scopes + admin approval | Read/write through your own session |
 
 ## Install
 
@@ -145,6 +146,21 @@ slackogo user info USER                   # User details
 slackogo workspace list                   # List workspaces
 slackogo status                           # Connection status
 ```
+
+### Canvases (SPEC-050)
+
+```bash
+slackogo canvas list [--channel C123] [--limit 100]
+slackogo canvas get CANVAS_ID [-o md|json|raw]
+slackogo canvas create --title "My doc" [--channel C123] [--from-file body.md] [--body "# inline"]
+slackogo canvas edit CANVAS_ID --op replace --section S1 --from-file new.md
+slackogo canvas edit CANVAS_ID --op insert_at_end --body "## Footer"
+slackogo canvas delete CANVAS_ID
+slackogo canvas access set CANVAS_ID --user U1 --user U2 --level read
+slackogo canvas access delete CANVAS_ID --user U1
+```
+
+Canvas edit ops: `insert_at_start` / `insert_at_end` / `insert_before` / `insert_after` / `replace` / `delete`.
 
 ## Output Modes
 

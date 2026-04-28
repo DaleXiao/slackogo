@@ -48,6 +48,7 @@ type CLI struct {
 	Search    SearchCmd    `cmd:"" help:"Search messages"`
 	Status    StatusCmd    `cmd:"" help:"Show current status"`
 	User      UserCmd      `cmd:"" help:"User operations"`
+	Canvas    CanvasCmd    `cmd:"" help:"Canvas operations"` // SPEC-050 v5
 }
 
 // === Auth ===
@@ -206,6 +207,20 @@ func main() {
 		err = runUserList(appCtx, &cli.User.List)
 	case "user info <user>":
 		err = runUserInfo(appCtx, &cli.User.Info)
+	case "canvas list":
+		err = runCanvasList(appCtx, &cli.Canvas.List)
+	case "canvas get <canvas-id>":
+		err = runCanvasGet(appCtx, &cli.Canvas.Get)
+	case "canvas create":
+		err = runCanvasCreate(appCtx, &cli.Canvas.Create)
+	case "canvas edit <canvas-id>":
+		err = runCanvasEdit(appCtx, &cli.Canvas.Edit)
+	case "canvas delete <canvas-id>":
+		err = runCanvasDelete(appCtx, &cli.Canvas.Delete)
+	case "canvas access set <canvas-id>":
+		err = runCanvasAccessSet(appCtx, &cli.Canvas.Access.Set)
+	case "canvas access delete <canvas-id>":
+		err = runCanvasAccessDelete(appCtx, &cli.Canvas.Access.Delete)
 	default:
 		err = fmt.Errorf("unknown command: %s", ctx.Command())
 	}

@@ -59,6 +59,29 @@ All requests use `POST https://<workspace>.slack.com/api/<method>` with:
 - `user list [--limit N]` — List via `users.list`
 - `user info <user>` — Detail via `users.info`
 
+### canvas (SPEC-050 v5)
+
+Wraps the Slack `canvases.*` web API family. All requests reuse the existing
+cookie + `xoxc-` token auth; no new scopes required.
+
+- `canvas list [--channel C123] [--limit N]` — `canvases.list`
+- `canvas get <canvas_id> [-o md|json|raw]` — `canvases.get`; `md` returns the
+  markdown body, `json`/`raw` return the full API response
+- `canvas create --title T [--channel C] [--from-file f|--body "..."]`
+  — `canvases.create` (standalone) or `conversations.canvases.create` when
+  `--channel` is set
+- `canvas edit <canvas_id> --op OP [--section S] [--from-file f|--body "..."]`
+  — `canvases.edit`; OP ∈ {insert_at_start, insert_at_end, insert_before,
+  insert_after, replace, delete}
+- `canvas delete <canvas_id>` — `canvases.delete`
+- `canvas access set <canvas_id> --user U... --level read|write`
+  — `canvases.access.set`
+- `canvas access delete <canvas_id> --user U...` — `canvases.access.delete`
+
+The canvas wrappers live in `internal/api/canvas.go` (a sibling file to
+`client.go`, NOT a modification of it). The CLI subtree lives in
+`cmd/slackogo/canvas.go`.
+
 ## Output Formats
 
 | Format | Flag | Description |

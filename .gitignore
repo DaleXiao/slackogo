@@ -2,3 +2,7 @@ slacko
 *.exe
 node/node_modules/
 dist/
+
+# build artifacts / scratch
+/slackogo
+/tmp-prompts/
