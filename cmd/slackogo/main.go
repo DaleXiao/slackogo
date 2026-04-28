@@ -350,8 +350,8 @@ func runAuthImport(ctx *app.Context, cmd *AuthImportCmd) error {
 		// saving credentials without a token leads to silent auth errors,
 		// retry loops, and potential F2A lockouts.
 		if !cmd.CookieOnly {
-			return fmt.Errorf("auth error: token extraction failed. Cookie saved but token is missing — API calls will fail.\n" +
-				"  Fix: run 'slackogo auth manual --token xoxc-YOUR-TOKEN --cookie YOUR-COOKIE " + workspace + "'")
+			return fmt.Errorf("auth error: token extraction failed. Cookie saved but token is missing — API calls will fail.\n"+
+				"  Fix: run 'slackogo auth manual --token xoxc-YOUR-TOKEN --cookie YOUR-COOKIE %s'", workspace)
 		}
 	} else {
 		if !ctx.Verbose {

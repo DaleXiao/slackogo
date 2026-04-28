@@ -5,6 +5,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -68,8 +69,8 @@ func TestCanvasesList_RequestParams(t *testing.T) {
 	if gotPath != "/files.list" {
 		t.Errorf("wire method path = %q, want /files.list", gotPath)
 	}
-	if got := captured.Get("types"); got != "canvases" {
-		t.Errorf("types = %q, want canvases", got)
+	if got := captured.Get("types"); got != "canvas" {
+		t.Errorf("types = %q, want canvas (singular per Slack docs surfaces/canvases/)", got)
 	}
 	if got := captured.Get("channel"); got != "C42" {
 		t.Errorf("channel = %q, want C42", got)
@@ -102,8 +103,8 @@ func TestCanvasesList_OmitsEmptyChannel(t *testing.T) {
 	if _, ok := captured["count"]; ok {
 		t.Errorf("count should be omitted when zero")
 	}
-	if captured.Get("types") != "canvases" {
-		t.Errorf("types should always be canvases")
+	if captured.Get("types") != "canvas" {
+		t.Errorf("types should always be canvas (singular)")
 	}
 }
 
@@ -313,5 +314,153 @@ func TestSlackError_NotInChannel(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not_in_channel") {
 		t.Errorf("error = %v, want not_in_channel surfaced", err)
+	}
+}
+
+// --- F-prefix validation propagation (SPEC-056 v4 ac) ---
+//
+// validateCanvasID is exercised in CanvasesGet directly; here we ensure it
+// is called by the other 5 wrappers that take a canvas_id, so a Q-prefix or
+// empty ID never reaches Slack and burns a request.
+
+func TestValidateCanvasID_PropagatesAcrossWrappers(t *testing.T) {
+	bad := []string{"", "Q123abc", "C123", "12345"}
+	cases := []struct {
+		name string
+		fn   func(*Client, string) error
+	}{
+		{"edit", func(c *Client, id string) error {
+			return c.CanvasesEdit(id, []CanvasChange{{Operation: "insert_at_end", DocumentContent: &CanvasDocumentContent{Type: "markdown", Markdown: "x"}}})
+		}},
+		{"delete", func(c *Client, id string) error { return c.CanvasesDelete(id) }},
+		{"sections.lookup", func(c *Client, id string) error { _, err := c.CanvasesSectionsLookup(id); return err }},
+		{"access.set", func(c *Client, id string) error { return c.CanvasesAccessSet(id, []string{"U1"}, "read") }},
+		{"access.delete", func(c *Client, id string) error { return c.CanvasesAccessDelete(id, []string{"U1"}) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("server should NOT be called with invalid canvas_id (%s)", tc.name)
+			})
+			defer srv.Close()
+			for _, id := range bad {
+				if err := tc.fn(c, id); err == nil {
+					t.Errorf("%s(%q): expected validation error, got nil", tc.name, id)
+				}
+			}
+		})
+	}
+}
+
+// --- CanvasesFetchBody (SPEC-058) ---
+
+func TestCanvasesFetchBody_FetchesDownloadURL(t *testing.T) {
+	// We need ONE httptest server that serves both /files.info (POST) and
+	// the url_private_download path (GET). The newMockClient helper wires
+	// BaseURL to the server root, so set url_private_download to the same
+	// origin's /files-pri/canvas-body path.
+
+	var infoForm url.Values
+	var downloadAuth, downloadCookie, downloadPath string
+	mux := http.NewServeMux()
+
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r)
+	})
+	defer srv.Close()
+
+	mux.HandleFunc("/files.info", func(w http.ResponseWriter, r *http.Request) {
+		infoForm = parseForm(t, r)
+		// Point url_private_download back at this same server.
+		dl := srv.URL + "/files-pri/canvas-body"
+		fmt.Fprintf(w, `{"ok":true,"file":{"id":"F1","filetype":"canvas","mimetype":"application/vnd.slack-docs","url_private_download":%q,"size":42}}`, dl)
+	})
+	mux.HandleFunc("/files-pri/canvas-body", func(w http.ResponseWriter, r *http.Request) {
+		downloadAuth = r.Header.Get("Authorization")
+		downloadCookie = r.Header.Get("Cookie")
+		downloadPath = r.URL.Path
+		_, _ = w.Write([]byte("# hello canvas\n\nbody body body."))
+	})
+
+	body, err := c.CanvasesFetchBody("F1")
+	if err != nil {
+		t.Fatalf("FetchBody err: %v", err)
+	}
+	if infoForm.Get("file") != "F1" {
+		t.Errorf("files.info file param = %q", infoForm.Get("file"))
+	}
+	if downloadPath != "/files-pri/canvas-body" {
+		t.Errorf("download path = %q", downloadPath)
+	}
+	if downloadAuth != "Bearer xoxc-test" {
+		t.Errorf("Authorization = %q, want Bearer xoxc-test", downloadAuth)
+	}
+	if downloadCookie != "d=d-cookie" {
+		t.Errorf("Cookie = %q, want d=d-cookie", downloadCookie)
+	}
+	if !strings.Contains(string(body.Raw), "hello canvas") {
+		t.Errorf("Raw = %q", string(body.Raw))
+	}
+	if body.IsJSON {
+		t.Errorf("IsJSON should be false for plain markdown payload")
+	}
+	if !strings.Contains(body.Markdown, "hello canvas") {
+		t.Errorf("Markdown = %q", body.Markdown)
+	}
+	if body.SourceURL == "" {
+		t.Errorf("SourceURL not set")
+	}
+}
+
+func TestCanvasesFetchBody_JSONEnvelopeExtractsMarkdown(t *testing.T) {
+	mux := http.NewServeMux()
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r)
+	})
+	defer srv.Close()
+
+	mux.HandleFunc("/files.info", func(w http.ResponseWriter, r *http.Request) {
+		dl := srv.URL + "/dl"
+		fmt.Fprintf(w, `{"ok":true,"file":{"id":"F2","filetype":"canvas","url_private_download":%q,"size":99}}`, dl)
+	})
+	mux.HandleFunc("/dl", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"markdown":"# from envelope","extra":"ignored"}`))
+	})
+
+	body, err := c.CanvasesFetchBody("F2")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !body.IsJSON {
+		t.Errorf("IsJSON should be true")
+	}
+	if body.Markdown != "# from envelope" {
+		t.Errorf("Markdown = %q, want '# from envelope'", body.Markdown)
+	}
+	if len(body.JSON) == 0 {
+		t.Errorf("JSON RawMessage should be populated")
+	}
+}
+
+func TestCanvasesFetchBody_RejectsNonCanvasFiletype(t *testing.T) {
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"file":{"id":"F3","filetype":"png","url_private_download":"https://x"}}`))
+	})
+	defer srv.Close()
+	if _, err := c.CanvasesFetchBody("F3"); err == nil {
+		t.Errorf("expected error for non-canvas filetype, got nil")
+	}
+}
+
+func TestCanvasesFetchBody_RejectsBadID(t *testing.T) {
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server should not be called for invalid ID")
+	})
+	defer srv.Close()
+	if _, err := c.CanvasesFetchBody("Q123"); err == nil {
+		t.Errorf("expected error for Q-prefix ID")
+	}
+	if _, err := c.CanvasesFetchBody(""); err == nil {
+		t.Errorf("expected error for empty ID")
 	}
 }

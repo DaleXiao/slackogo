@@ -17,6 +17,7 @@ package main
 //   slackogo canvas access set <canvas_id> --user U123 [--user U456...] --level read|write
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -115,37 +116,59 @@ func runCanvasGet(ctx *app.Context, cmd *CanvasGetCmd) error {
 		return err
 	}
 
-	// Slack API "format" values: empty (default), "markdown", "raw".
-	// CLI exposes md/json/raw — md|raw map to API format, json prints raw API response.
-	apiFormat := ""
-	switch cmd.Format {
-	case "md":
-		apiFormat = "markdown"
-	case "raw":
-		apiFormat = "raw"
-	case "json":
-		apiFormat = "" // default, return full canvas object
+	// SPEC-058 v3: -o raw|md|json all need the actual canvas body, which
+	// lives at file.url_private_download (NOT in files.info metadata).
+	// CanvasesFetchBody handles files.info → download → sniff envelope.
+	// Slack's canvas content is markdown (per docs.slack.dev/surfaces/canvases
+	// "Formatting canvas content with the Slack API"); the download endpoint
+	// usually returns the markdown verbatim, but may wrap it in a JSON
+	// envelope. CanvasesFetchBody.Markdown is populated either way.
+
+	if cmd.Format == "" || cmd.Format == "info" {
+		// Backwards-compat: if Format is empty (no -o flag), behave like
+		// pre-SPEC-058 metadata-only get so existing scripts don't break.
+		resp, err := client.CanvasesGet(cmd.CanvasID, "")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(resp.Raw))
+		return nil
 	}
 
-	resp, err := client.CanvasesGet(cmd.CanvasID, apiFormat)
+	body, err := client.CanvasesFetchBody(cmd.CanvasID)
 	if err != nil {
 		return err
 	}
 
 	switch cmd.Format {
-	case "json":
-		// Print the entire raw API response untouched.
-		fmt.Println(string(resp.Raw))
+	case "raw":
+		// Stream the bytes verbatim (no parsing, no trailing newline magic).
+		// Useful for binary diffing and for tester verification that
+		// `bytes ≈ files.info.size`.
+		_, _ = os.Stdout.Write(body.Raw)
 		return nil
 	case "md":
-		if resp.Markdown != "" {
-			fmt.Println(resp.Markdown)
-		} else {
-			ctx.Printer.Human("(no markdown body returned)")
+		if body.Markdown == "" {
+			// Conservative: print raw bytes as text rather than nothing,
+			// so users see *something* even if the envelope sniffer missed.
+			fmt.Println(string(body.Raw))
+			return nil
 		}
+		fmt.Println(body.Markdown)
 		return nil
-	case "raw":
-		fmt.Println(string(resp.Raw))
+	case "json":
+		if body.IsJSON {
+			fmt.Println(string(body.JSON))
+			return nil
+		}
+		// Wrap plain markdown into a JSON envelope so `-o json` always
+		// returns valid JSON.
+		envelope := map[string]string{"markdown": body.Markdown}
+		out, err := json.MarshalIndent(envelope, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
 		return nil
 	}
 	return nil

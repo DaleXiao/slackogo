@@ -14,10 +14,31 @@ package api
 // API reference: https://docs.slack.dev/reference/methods/canvases.create/
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
+	"strings"
 )
+
+// validateCanvasID enforces that canvas IDs are F-prefix file IDs (e.g.
+// F0ASWF3SRST). The legacy Q-prefix ("Quip") IDs and empty strings are
+// rejected because Slack canvases.* methods always require an F-prefix file
+// ID since the 2024 Canvas API consolidation. Returning early avoids a
+// confusing slack API error like `invalid_arguments` from the server.
+//
+// Caller convention: the wrapper that takes canvas_id calls this first.
+func validateCanvasID(canvasID string) error {
+	if canvasID == "" {
+		return fmt.Errorf("canvas ID required (F-prefix file ID, e.g. F0ASWF3SRST); use 'slackogo canvas list' to find IDs")
+	}
+	if canvasID[0] != 'F' {
+		return fmt.Errorf("canvas ID must be F-prefix file ID (got %q); use 'slackogo canvas list' to find IDs", canvasID)
+	}
+	return nil
+}
 
 // === Types ===
 
@@ -110,12 +131,16 @@ type CanvasesListResponse struct {
 // CanvasesList lists canvases visible to the caller. channelID is optional;
 // when set, results are scoped to that channel.
 //
-// Underlying Slack method: files.list with types=canvases (the
+// Underlying Slack method: files.list with types=canvas (the
 // non-existent canvases.list shipped in v0.4.0 is replaced).
+// The Slack docs say "types=canvas" (singular) at
+// https://docs.slack.dev/surfaces/canvases/. v0.4.1 used "canvases"
+// (plural) which silently returned empty for some workspaces; SPEC-056 v4
+// hot-fixes this to "canvas".
 // Canvas IDs returned are F-prefix file IDs (e.g. F0ASWF3SRST).
 func (c *Client) CanvasesList(channelID string, limit int) (*CanvasesListResponse, error) {
 	params := url.Values{}
-	params.Set("types", "canvases")
+	params.Set("types", "canvas")
 	if channelID != "" {
 		params.Set("channel", channelID)
 	}
@@ -173,11 +198,8 @@ type CanvasGetResponse struct {
 // exist on Slack public API (confirmed empty at
 // https://api.slack.com/methods?filter=canvases).
 func (c *Client) CanvasesGet(canvasID, format string) (*CanvasGetResponse, error) {
-	if canvasID == "" {
-		return nil, fmt.Errorf("canvas ID required (F-prefix file ID, e.g. F0ASWF3SRST)")
-	}
-	if canvasID[0] != 'F' {
-		return nil, fmt.Errorf("canvas ID must be F-prefix file ID (got %q); use 'slackogo canvas list' to find IDs", canvasID)
+	if err := validateCanvasID(canvasID); err != nil {
+		return nil, err
 	}
 	_ = format // accepted for back-compat; files.info returns metadata regardless
 	params := url.Values{}
@@ -269,6 +291,9 @@ func (c *Client) CanvasesCreate(title, markdown, channelID string) (*CanvasCreat
 // CanvasesEdit applies a batch of changes (insert/replace/delete sections)
 // to a canvas in a single API call.
 func (c *Client) CanvasesEdit(canvasID string, changes []CanvasChange) error {
+	if err := validateCanvasID(canvasID); err != nil {
+		return err
+	}
 	if len(changes) == 0 {
 		return fmt.Errorf("canvases.edit requires at least one change")
 	}
@@ -295,6 +320,9 @@ func (c *Client) CanvasesEdit(canvasID string, changes []CanvasChange) error {
 
 // CanvasesDelete deletes a canvas.
 func (c *Client) CanvasesDelete(canvasID string) error {
+	if err := validateCanvasID(canvasID); err != nil {
+		return err
+	}
 	params := url.Values{}
 	params.Set("canvas_id", canvasID)
 	if _, err := c.Post("canvases.delete", params); err != nil {
@@ -313,6 +341,9 @@ type CanvasSectionsLookupResponse struct {
 // CanvasesSectionsLookup returns the section list for a canvas (used to
 // resolve section_id values for edit operations).
 func (c *Client) CanvasesSectionsLookup(canvasID string) (*CanvasSectionsLookupResponse, error) {
+	if err := validateCanvasID(canvasID); err != nil {
+		return nil, err
+	}
 	params := url.Values{}
 	params.Set("canvas_id", canvasID)
 	data, err := c.Post("canvases.sections.lookup", params)
@@ -331,6 +362,9 @@ func (c *Client) CanvasesSectionsLookup(canvasID string) (*CanvasSectionsLookupR
 // CanvasesAccessSet grants users access to a canvas at a level
 // ("read" or "write").
 func (c *Client) CanvasesAccessSet(canvasID string, userIDs []string, level string) error {
+	if err := validateCanvasID(canvasID); err != nil {
+		return err
+	}
 	if len(userIDs) == 0 {
 		return fmt.Errorf("canvases.access.set requires at least one user_id")
 	}
@@ -353,6 +387,9 @@ func (c *Client) CanvasesAccessSet(canvasID string, userIDs []string, level stri
 
 // CanvasesAccessDelete revokes user access to a canvas.
 func (c *Client) CanvasesAccessDelete(canvasID string, userIDs []string) error {
+	if err := validateCanvasID(canvasID); err != nil {
+		return err
+	}
 	if len(userIDs) == 0 {
 		return fmt.Errorf("canvases.access.delete requires at least one user_id")
 	}
@@ -367,4 +404,151 @@ func (c *Client) CanvasesAccessDelete(canvasID string, userIDs []string) error {
 		return err
 	}
 	return nil
+}
+
+// === Body fetch (SPEC-058) ===
+
+// CanvasBody holds the canvas document body fetched from
+// url_private_download. The field set covers the three CLI output modes:
+//   - Raw    : original bytes returned by Slack (no parsing)
+//   - Markdown: markdown text (either Raw verbatim if Slack returned plain
+//               markdown, or extracted from a JSON envelope's "markdown"
+//               field — see CanvasesFetchBody for sniffing rules)
+//   - JSON   : a structured representation. If Slack returned JSON, this
+//               is the parsed value (json.RawMessage so callers can
+//               re-marshal pretty); otherwise this wraps the markdown text
+//               as `{"markdown": "..."}` so `-o json` always returns
+//               valid JSON.
+type CanvasBody struct {
+	Raw      []byte          `json:"-"`
+	Markdown string          `json:"markdown,omitempty"`
+	JSON     json.RawMessage `json:"json,omitempty"`
+	// IsJSON is true when the downloaded payload was valid JSON. When false,
+	// the payload was treated as plain markdown text.
+	IsJSON bool `json:"-"`
+	// SourceURL is the url_private_download we fetched from (useful for
+	// debugging in the PR description / logs).
+	SourceURL string `json:"-"`
+}
+
+// CanvasesFetchBody resolves a canvas's url_private_download via files.info,
+// then GETs that URL with the workspace credentials (Bearer xoxc + Cookie d=)
+// and returns the document body as bytes.
+//
+// The Slack canvas content format is markdown (per
+// https://docs.slack.dev/surfaces/canvases/ "Formatting canvas content with
+// the Slack API" → `document_content.markdown`). The download endpoint may
+// return either:
+//   - plain markdown text (mimetype application/vnd.slack-docs treated as
+//     UTF-8 text), or
+//   - a thin JSON envelope wrapping the markdown (e.g. {"markdown": "..."}
+//     or {"body": "..."}).
+//
+// We sniff: if bytes parse as JSON and contain a "markdown" or "body" string
+// field, we extract that for Markdown. Otherwise, the bytes are treated as
+// markdown verbatim. This is conservative — Dale verifies actual fixtures at
+// PR review time and the heuristic can be patched in one line if Slack ships
+// a different envelope key.
+//
+// internal/api/client.go is intentionally NOT modified (per SPEC-050 v5
+// constraint #1); this method does its own HTTP request using c.HTTPClient
+// and reads c.Creds.{Token,Cookie} directly.
+func (c *Client) CanvasesFetchBody(canvasID string) (*CanvasBody, error) {
+	if err := validateCanvasID(canvasID); err != nil {
+		return nil, err
+	}
+
+	// Step 1 — files.info to find the download URL.
+	params := url.Values{}
+	params.Set("file", canvasID)
+	infoData, err := c.Post("files.info", params)
+	if err != nil {
+		return nil, fmt.Errorf("canvas body: files.info: %w", err)
+	}
+	var info struct {
+		File struct {
+			ID                 string `json:"id"`
+			Filetype           string `json:"filetype"`
+			Mimetype           string `json:"mimetype"`
+			URLPrivate         string `json:"url_private"`
+			URLPrivateDownload string `json:"url_private_download"`
+			Size               int64  `json:"size"`
+		} `json:"file"`
+	}
+	if err := json.Unmarshal(infoData, &info); err != nil {
+		return nil, fmt.Errorf("canvas body: decode files.info: %w", err)
+	}
+	if info.File.Filetype != "" && info.File.Filetype != "canvas" && info.File.Filetype != "quip" {
+		return nil, fmt.Errorf("canvas body: file %s is filetype %q, not canvas", canvasID, info.File.Filetype)
+	}
+	dl := info.File.URLPrivateDownload
+	if dl == "" {
+		// Fall back to url_private (browser-link variant). Slack returns one
+		// or the other depending on the file type.
+		dl = info.File.URLPrivate
+	}
+	if dl == "" {
+		return nil, fmt.Errorf("canvas body: files.info returned no download URL for %s", canvasID)
+	}
+
+	// Step 2 — GET the download URL with workspace creds.
+	req, err := http.NewRequest("GET", dl, nil)
+	if err != nil {
+		return nil, fmt.Errorf("canvas body: build request: %w", err)
+	}
+	// xoxc tokens are presented as Authorization: Bearer per Slack's file
+	// download convention; the workspace cookie (d=...) authenticates the
+	// session against files.slack.com.
+	req.Header.Set("Authorization", "Bearer "+c.Creds.Token)
+	req.Header.Set("Cookie", "d="+c.Creds.Cookie)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("canvas body: GET %s: %w", dl, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		// Read up to 1KiB of the error body for diagnostics.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("canvas body: download HTTP %d from %s: %s", resp.StatusCode, dl, strings.TrimSpace(string(snippet)))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("canvas body: read body: %w", err)
+	}
+
+	out := &CanvasBody{
+		Raw:       body,
+		SourceURL: dl,
+	}
+
+	// Step 3 — sniff envelope.
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		var generic any
+		if err := json.Unmarshal(body, &generic); err == nil {
+			out.IsJSON = true
+			out.JSON = json.RawMessage(body)
+			// Try common envelope keys for the markdown body.
+			if obj, ok := generic.(map[string]any); ok {
+				for _, k := range []string{"markdown", "body", "content", "doc", "document"} {
+					if v, ok := obj[k]; ok {
+						if s, ok := v.(string); ok && s != "" {
+							out.Markdown = s
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	if out.Markdown == "" && !out.IsJSON {
+		// Treat the raw bytes as markdown text.
+		out.Markdown = string(body)
+	}
+	return out, nil
 }
