@@ -169,29 +169,101 @@ func (c *Client) CanvasesList(channelID string, limit int) (*CanvasesListRespons
 
 type CanvasGetResponse struct {
 	SlackResponse
-	Canvas CanvasInfo      `json:"canvas"`
-	Markdown string        `json:"markdown,omitempty"` // when format=markdown
-	Raw    json.RawMessage `json:"-"`
+	Canvas   CanvasInfo      `json:"canvas"`
+	Markdown string          `json:"markdown,omitempty"` // when format=markdown
+	Raw      json.RawMessage `json:"-"`
 }
 
-// CanvasesGet fetches a single canvas. format may be "" (default), "markdown",
-// or "raw" — passed through to Slack.
+// filesInfoResponse mirrors the relevant subset of files.info.
+type filesInfoResponse struct {
+	SlackResponse
+	File struct {
+		ID                string   `json:"id"`
+		Filetype          string   `json:"filetype"`
+		Mimetype          string   `json:"mimetype"`
+		Title             string   `json:"title"`
+		Name              string   `json:"name"`
+		User              string   `json:"user"`
+		Channels          []string `json:"channels"`
+		Permalink         string   `json:"permalink"`
+		URLPrivate        string   `json:"url_private"`
+		URLPrivateDownload string  `json:"url_private_download"`
+		Created           int64    `json:"created"`
+		Updated           int64    `json:"updated"`
+	} `json:"file"`
+}
+
+// CanvasesGet fetches a single canvas via Slack's `files.info` endpoint.
+//
+// Slack has no `canvases.get` method (verified via
+// https://docs.slack.dev/reference/methods/canvases.create sidebar — only
+// canvases.create/edit/delete/sections.lookup/access.set/access.delete are
+// listed). Canvases are surfaced as files of mimetype
+// `application/vnd.slack-docs`; per https://docs.slack.dev/surfaces/canvases/
+// they are retrieved through the standard files.info endpoint.
+//
+// canvasID must be an F-prefix file ID (e.g. F0ASWF3SRST). The legacy
+// Q-prefix IDs returned by old preview surfaces are not valid here.
+//
+// format is accepted for CLI compatibility (markdown|json|raw) but does not
+// alter the wire request — Slack returns the canvas content in the file
+// object's `url_private_download` for follow-up download.
 func (c *Client) CanvasesGet(canvasID, format string) (*CanvasGetResponse, error) {
-	params := url.Values{}
-	params.Set("canvas_id", canvasID)
-	if format != "" {
-		params.Set("format", format)
+	if err := validateCanvasID(canvasID); err != nil {
+		return nil, err
 	}
-	data, err := c.Post("canvases.get", params)
+	params := url.Values{}
+	params.Set("file", canvasID)
+	data, err := c.Post("files.info", params)
 	if err != nil {
 		return nil, err
 	}
-	var resp CanvasGetResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode canvases.get: %w", err)
+	var raw filesInfoResponse
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("decode files.info: %w", err)
 	}
-	resp.Raw = data
-	return &resp, nil
+	// Defensive mimetype check — Slack canvases have mimetype
+	// application/vnd.slack-docs. Filetype is `canvas`.
+	if raw.File.Filetype != "" && raw.File.Filetype != "canvas" {
+		return nil, fmt.Errorf("file %s is not a canvas (filetype=%s, mimetype=%s)", canvasID, raw.File.Filetype, raw.File.Mimetype)
+	}
+	resp := &CanvasGetResponse{SlackResponse: raw.SlackResponse, Raw: data}
+	title := raw.File.Title
+	if title == "" {
+		title = raw.File.Name
+	}
+	u := raw.File.Permalink
+	if u == "" {
+		u = raw.File.URLPrivate
+	}
+	var ch string
+	if len(raw.File.Channels) > 0 {
+		ch = raw.File.Channels[0]
+	}
+	resp.Canvas = CanvasInfo{
+		ID:          raw.File.ID,
+		Title:       title,
+		OwnerID:     raw.File.User,
+		ChannelID:   ch,
+		URL:         u,
+		DateCreated: raw.File.Created,
+		DateUpdated: raw.File.Updated,
+	}
+	_ = format // CLI surface compatibility; format is honored at the print layer.
+	return resp, nil
+}
+
+// validateCanvasID returns an error if id is not a Slack F-prefix file ID.
+// Canvases use the standard file ID format (F-prefix); Q-prefix IDs from
+// legacy preview surfaces are explicitly rejected per SPEC-056 v2.
+func validateCanvasID(id string) error {
+	if id == "" {
+		return fmt.Errorf("canvas id is required")
+	}
+	if id[0] != 'F' {
+		return fmt.Errorf("canvas id %q is not an F-prefix file ID; canvases are files (e.g. F0ASWF3SRST), Q-prefix IDs from legacy surfaces are not valid", id)
+	}
+	return nil
 }
 
 // === Create ===
@@ -237,6 +309,9 @@ func (c *Client) CanvasesCreate(title, markdown, channelID string) (*CanvasCreat
 // CanvasesEdit applies a batch of changes (insert/replace/delete sections)
 // to a canvas in a single API call.
 func (c *Client) CanvasesEdit(canvasID string, changes []CanvasChange) error {
+	if err := validateCanvasID(canvasID); err != nil {
+		return err
+	}
 	if len(changes) == 0 {
 		return fmt.Errorf("canvases.edit requires at least one change")
 	}
@@ -263,6 +338,9 @@ func (c *Client) CanvasesEdit(canvasID string, changes []CanvasChange) error {
 
 // CanvasesDelete deletes a canvas.
 func (c *Client) CanvasesDelete(canvasID string) error {
+	if err := validateCanvasID(canvasID); err != nil {
+		return err
+	}
 	params := url.Values{}
 	params.Set("canvas_id", canvasID)
 	if _, err := c.Post("canvases.delete", params); err != nil {
@@ -281,6 +359,9 @@ type CanvasSectionsLookupResponse struct {
 // CanvasesSectionsLookup returns the section list for a canvas (used to
 // resolve section_id values for edit operations).
 func (c *Client) CanvasesSectionsLookup(canvasID string) (*CanvasSectionsLookupResponse, error) {
+	if err := validateCanvasID(canvasID); err != nil {
+		return nil, err
+	}
 	params := url.Values{}
 	params.Set("canvas_id", canvasID)
 	data, err := c.Post("canvases.sections.lookup", params)
@@ -299,6 +380,9 @@ func (c *Client) CanvasesSectionsLookup(canvasID string) (*CanvasSectionsLookupR
 // CanvasesAccessSet grants users access to a canvas at a level
 // ("read" or "write").
 func (c *Client) CanvasesAccessSet(canvasID string, userIDs []string, level string) error {
+	if err := validateCanvasID(canvasID); err != nil {
+		return err
+	}
 	if len(userIDs) == 0 {
 		return fmt.Errorf("canvases.access.set requires at least one user_id")
 	}
@@ -321,6 +405,9 @@ func (c *Client) CanvasesAccessSet(canvasID string, userIDs []string, level stri
 
 // CanvasesAccessDelete revokes user access to a canvas.
 func (c *Client) CanvasesAccessDelete(canvasID string, userIDs []string) error {
+	if err := validateCanvasID(canvasID); err != nil {
+		return err
+	}
 	if len(userIDs) == 0 {
 		return fmt.Errorf("canvases.access.delete requires at least one user_id")
 	}

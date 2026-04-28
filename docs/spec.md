@@ -65,6 +65,7 @@ Wraps the Slack `canvases.*` web API family. All requests reuse the existing
 cookie + `xoxc-` token auth; no new scopes required.
 
 - `canvas list [--channel C123] [--limit N]` — `files.list?types=canvas` (Slack has no `canvases.list`; canvases are surfaced as files of type `canvas` per https://docs.slack.dev/surfaces/canvases/)
+- `canvas get <F-id>` — `files.info?file=<F-id>` (Slack has no `canvases.get`; canvas IDs are F-prefix file IDs, e.g. `F0ASWF3SRST`)
 - `canvas get <canvas_id> [-o md|json|raw]` — `canvases.get`; `md` returns the
   markdown body, `json`/`raw` return the full API response
 - `canvas create --title T [--channel C] [--from-file f|--body "..."]`

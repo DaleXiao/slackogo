@@ -164,28 +164,110 @@ func TestCanvasesList_TitleFallbackToName(t *testing.T) {
 	}
 }
 
-// --- get ---
+// --- get (SPEC-056 v2: files.info, F-prefix only) ---
 
-func TestCanvasesGet_FormatPassthrough(t *testing.T) {
+func TestCanvasesGet_UsesFilesInfo(t *testing.T) {
 	var captured url.Values
+	var gotPath string
 	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
 		captured = parseForm(t, r)
-		_, _ = w.Write([]byte(`{"ok":true,"canvas":{"id":"F1"},"markdown":"# hi"}`))
+		_, _ = w.Write([]byte(`{"ok":true,"file":{"id":"F0ASWF3SRST","filetype":"canvas","mimetype":"application/vnd.slack-docs","title":"hi","user":"U1","channels":["C42"],"permalink":"https://x/docs/F0ASWF3SRST","created":1700000000,"updated":1700000100}}`))
 	})
 	defer srv.Close()
 
-	resp, err := c.CanvasesGet("F1", "markdown")
+	resp, err := c.CanvasesGet("F0ASWF3SRST", "markdown")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if captured.Get("canvas_id") != "F1" || captured.Get("format") != "markdown" {
-		t.Errorf("params = %v", captured)
+	// SPEC-056 v2: must call files.info, not canvases.get
+	if gotPath != "/files.info" {
+		t.Errorf("path = %q, want /files.info", gotPath)
 	}
-	if resp.Markdown != "# hi" {
-		t.Errorf("markdown = %q", resp.Markdown)
+	if captured.Get("file") != "F0ASWF3SRST" {
+		t.Errorf("file param = %q", captured.Get("file"))
+	}
+	// canvas_id is the legacy param; must NOT be sent
+	if _, ok := captured["canvas_id"]; ok {
+		t.Errorf("legacy canvas_id param leaked: %v", captured)
+	}
+	if resp.Canvas.ID != "F0ASWF3SRST" || resp.Canvas.Title != "hi" {
+		t.Errorf("canvas mapping = %+v", resp.Canvas)
 	}
 	if len(resp.Raw) == 0 {
 		t.Errorf("raw not captured")
+	}
+}
+
+func TestCanvasesGet_RejectsQPrefix(t *testing.T) {
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("server should not be called for invalid id")
+	})
+	defer srv.Close()
+
+	_, err := c.CanvasesGet("Q123ABC", "")
+	if err == nil {
+		t.Fatal("expected validation error for Q-prefix id")
+	}
+	if !strings.Contains(err.Error(), "F-prefix") {
+		t.Errorf("error should mention F-prefix: %v", err)
+	}
+}
+
+func TestCanvasesGet_RejectsEmptyID(t *testing.T) {
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("server should not be called")
+	})
+	defer srv.Close()
+	if _, err := c.CanvasesGet("", ""); err == nil {
+		t.Error("expected validation error")
+	}
+}
+
+func TestCanvasesGet_RejectsNonCanvasFiletype(t *testing.T) {
+	// files.info on a non-canvas F-id (e.g. an image) should be rejected
+	// defensively even though Slack returns ok=true.
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"file":{"id":"F999","filetype":"png","mimetype":"image/png","title":"img"}}`))
+	})
+	defer srv.Close()
+	_, err := c.CanvasesGet("F999", "")
+	if err == nil {
+		t.Fatal("expected non-canvas filetype error")
+	}
+	if !strings.Contains(err.Error(), "not a canvas") {
+		t.Errorf("error wording: %v", err)
+	}
+}
+
+// --- F-prefix validation propagation across wrappers ---
+
+func TestValidateCanvasID_PropagatesAcrossWrappers(t *testing.T) {
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("server must not be called for invalid id, path=%s", r.URL.Path)
+	})
+	defer srv.Close()
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"edit", func() error { return c.CanvasesEdit("Q1", []CanvasChange{{Operation: "insert_at_end"}}) }},
+		{"delete", func() error { return c.CanvasesDelete("Q1") }},
+		{"sections.lookup", func() error { _, e := c.CanvasesSectionsLookup("Q1"); return e }},
+		{"access.set", func() error { return c.CanvasesAccessSet("Q1", []string{"U1"}, "read") }},
+		{"access.delete", func() error { return c.CanvasesAccessDelete("Q1", []string{"U1"}) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("expected validation error for Q-prefix id")
+			}
+			if !strings.Contains(err.Error(), "F-prefix") {
+				t.Errorf("error wording: %v", err)
+			}
+		})
 	}
 }
 

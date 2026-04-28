@@ -151,7 +151,7 @@ slackogo status                           # Connection status
 
 ```bash
 slackogo canvas list [--channel C123] [--limit 100]   # uses files.list?types=canvas
-slackogo canvas get CANVAS_ID [-o md|json|raw]
+slackogo canvas get F0ASWF3SRST [-o md|json|raw]      # uses files.info; ID must be F-prefix
 slackogo canvas create --title "My doc" [--channel C123] [--from-file body.md] [--body "# inline"]
 slackogo canvas edit CANVAS_ID --op replace --section S1 --from-file new.md
 slackogo canvas edit CANVAS_ID --op insert_at_end --body "## Footer"
