@@ -147,7 +147,7 @@ slackogo workspace list                   # List workspaces
 slackogo status                           # Connection status
 ```
 
-### Canvases (SPEC-050)
+### Canvases (SPEC-050 / SPEC-056 / SPEC-058)
 
 ```bash
 slackogo canvas list [--channel C123] [--limit 100]
@@ -161,6 +161,22 @@ slackogo canvas access delete CANVAS_ID --user U1
 ```
 
 Canvas edit ops: `insert_at_start` / `insert_at_end` / `insert_before` / `insert_after` / `replace` / `delete`.
+
+`CANVAS_ID` must be an F-prefix file ID (e.g. `F0ASWF3SRST`) — use `canvas
+list` to find them. The legacy Q-prefix "Quip" IDs are rejected client-side.
+
+`canvas list` calls `files.list?types=canvas` (singular, per Slack docs) and
+filters to canvas filetype. `canvas get`:
+
+- with no `-o` flag: prints `files.info` metadata only.
+- `-o raw`: fetches `file.url_private_download` with the workspace
+  Bearer token + cookie and writes the bytes verbatim (use this when you
+  want the original payload).
+- `-o md`: same fetch, then either returns the body verbatim (Slack canvas
+  bodies are markdown by design) or extracts the `markdown` / `body` field
+  if Slack wraps the payload in a JSON envelope.
+- `-o json`: returns the parsed envelope when Slack ships JSON, otherwise
+  wraps the markdown text as `{"markdown": "..."}`.
 
 ## Output Modes
 
