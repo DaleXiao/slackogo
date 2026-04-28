@@ -53,9 +53,11 @@ func parseForm(t *testing.T, r *http.Request) url.Values {
 
 func TestCanvasesList_RequestParams(t *testing.T) {
 	var captured url.Values
+	var gotPath string
 	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
 		captured = parseForm(t, r)
-		_, _ = w.Write([]byte(`{"ok":true,"canvases":[{"id":"F123","title":"hi"}]}`))
+		_, _ = w.Write([]byte(`{"ok":true,"files":[{"id":"F123","title":"hi","filetype":"canvas","channels":["C42"],"created":1700000000}]}`))
 	})
 	defer srv.Close()
 
@@ -63,16 +65,22 @@ func TestCanvasesList_RequestParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CanvasesList err: %v", err)
 	}
-	if got := captured.Get("channel_id"); got != "C42" {
-		t.Errorf("channel_id = %q, want C42", got)
+	if gotPath != "/files.list" {
+		t.Errorf("wire method path = %q, want /files.list", gotPath)
 	}
-	if got := captured.Get("limit"); got != "25" {
-		t.Errorf("limit = %q, want 25", got)
+	if got := captured.Get("types"); got != "canvases" {
+		t.Errorf("types = %q, want canvases", got)
+	}
+	if got := captured.Get("channel"); got != "C42" {
+		t.Errorf("channel = %q, want C42", got)
+	}
+	if got := captured.Get("count"); got != "25" {
+		t.Errorf("count = %q, want 25", got)
 	}
 	if got := captured.Get("token"); got != "xoxc-test" {
 		t.Errorf("token = %q, want xoxc-test", got)
 	}
-	if len(resp.Canvases) != 1 || resp.Canvases[0].ID != "F123" {
+	if len(resp.Canvases) != 1 || resp.Canvases[0].ID != "F123" || resp.Canvases[0].ChannelID != "C42" {
 		t.Errorf("canvases = %+v", resp.Canvases)
 	}
 }
@@ -81,28 +89,33 @@ func TestCanvasesList_OmitsEmptyChannel(t *testing.T) {
 	var captured url.Values
 	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
 		captured = parseForm(t, r)
-		_, _ = w.Write([]byte(`{"ok":true,"canvases":[]}`))
+		_, _ = w.Write([]byte(`{"ok":true,"files":[]}`))
 	})
 	defer srv.Close()
 
 	if _, err := c.CanvasesList("", 0); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if _, ok := captured["channel_id"]; ok {
-		t.Errorf("channel_id should be omitted when empty")
+	if _, ok := captured["channel"]; ok {
+		t.Errorf("channel should be omitted when empty")
 	}
-	if _, ok := captured["limit"]; ok {
-		t.Errorf("limit should be omitted when zero")
+	if _, ok := captured["count"]; ok {
+		t.Errorf("count should be omitted when zero")
+	}
+	if captured.Get("types") != "canvases" {
+		t.Errorf("types should always be canvases")
 	}
 }
 
 // --- get ---
 
-func TestCanvasesGet_FormatPassthrough(t *testing.T) {
+func TestCanvasesGet_UsesFilesInfo(t *testing.T) {
 	var captured url.Values
+	var gotPath string
 	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
 		captured = parseForm(t, r)
-		_, _ = w.Write([]byte(`{"ok":true,"canvas":{"id":"F1"},"markdown":"# hi"}`))
+		_, _ = w.Write([]byte(`{"ok":true,"file":{"id":"F1","title":"hi","filetype":"canvas","mimetype":"application/vnd.slack-docs","user":"U1","channels":["C9"],"permalink":"https://slack.example/x","created":1700000000,"updated":1700000100}}`))
 	})
 	defer srv.Close()
 
@@ -110,14 +123,31 @@ func TestCanvasesGet_FormatPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if captured.Get("canvas_id") != "F1" || captured.Get("format") != "markdown" {
-		t.Errorf("params = %v", captured)
+	if gotPath != "/files.info" {
+		t.Errorf("wire method = %q, want /files.info", gotPath)
 	}
-	if resp.Markdown != "# hi" {
-		t.Errorf("markdown = %q", resp.Markdown)
+	if captured.Get("file") != "F1" {
+		t.Errorf("file param = %q, want F1", captured.Get("file"))
+	}
+	if resp.Canvas.ID != "F1" || resp.Canvas.Title != "hi" || resp.Canvas.ChannelID != "C9" {
+		t.Errorf("canvas = %+v", resp.Canvas)
 	}
 	if len(resp.Raw) == 0 {
 		t.Errorf("raw not captured")
+	}
+}
+
+func TestCanvasesGet_RejectsNonFPrefixID(t *testing.T) {
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server should not be called for invalid ID")
+	})
+	defer srv.Close()
+
+	if _, err := c.CanvasesGet("Q123", ""); err == nil {
+		t.Errorf("expected error for Q-prefix ID, got nil")
+	}
+	if _, err := c.CanvasesGet("", ""); err == nil {
+		t.Errorf("expected error for empty ID, got nil")
 	}
 }
 

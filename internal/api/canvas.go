@@ -68,6 +68,36 @@ type CanvasSection struct {
 }
 
 // === List ===
+//
+// Slack canvases are exposed via the files API. There is NO `canvases.list`
+// method (confirmed via https://api.slack.com/methods?filter=canvases — empty).
+// Per https://docs.slack.dev/surfaces/canvases/ we use
+// `files.list` with `types=canvases` (filter by canvas filetype).
+
+type filesListFile struct {
+	ID         string   `json:"id"`
+	Title      string   `json:"title"`
+	Name       string   `json:"name"`
+	Filetype   string   `json:"filetype"`
+	Mimetype   string   `json:"mimetype"`
+	User       string   `json:"user"`
+	Channels   []string `json:"channels"`
+	Permalink  string   `json:"permalink"`
+	URLPrivate string   `json:"url_private"`
+	Created    int64    `json:"created"`
+	Updated    int64    `json:"updated"`
+}
+
+type filesListResponse struct {
+	SlackResponse
+	Files  []filesListFile `json:"files"`
+	Paging struct {
+		Count int `json:"count"`
+		Total int `json:"total"`
+		Page  int `json:"page"`
+		Pages int `json:"pages"`
+	} `json:"paging"`
+}
 
 type CanvasesListResponse struct {
 	SlackResponse
@@ -79,23 +109,50 @@ type CanvasesListResponse struct {
 
 // CanvasesList lists canvases visible to the caller. channelID is optional;
 // when set, results are scoped to that channel.
+//
+// Underlying Slack method: files.list with types=canvases (the
+// non-existent canvases.list shipped in v0.4.0 is replaced).
+// Canvas IDs returned are F-prefix file IDs (e.g. F0ASWF3SRST).
 func (c *Client) CanvasesList(channelID string, limit int) (*CanvasesListResponse, error) {
 	params := url.Values{}
+	params.Set("types", "canvases")
 	if channelID != "" {
-		params.Set("channel_id", channelID)
+		params.Set("channel", channelID)
 	}
 	if limit > 0 {
-		params.Set("limit", fmt.Sprintf("%d", limit))
+		params.Set("count", fmt.Sprintf("%d", limit))
 	}
-	data, err := c.Post("canvases.list", params)
+	data, err := c.Post("files.list", params)
 	if err != nil {
 		return nil, err
 	}
-	var resp CanvasesListResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode canvases.list: %w", err)
+	var fl filesListResponse
+	if err := json.Unmarshal(data, &fl); err != nil {
+		return nil, fmt.Errorf("decode files.list: %w", err)
 	}
-	return &resp, nil
+	resp := &CanvasesListResponse{SlackResponse: fl.SlackResponse}
+	for _, f := range fl.Files {
+		// Defensive filter — types=canvases server-side filter, but be paranoid.
+		if f.Filetype != "" && f.Filetype != "canvas" && f.Filetype != "quip" {
+			continue
+		}
+		info := CanvasInfo{
+			ID:          f.ID,
+			Title:       f.Title,
+			OwnerID:     f.User,
+			URL:         f.Permalink,
+			DateCreated: f.Created,
+			DateUpdated: f.Updated,
+		}
+		if info.Title == "" {
+			info.Title = f.Name
+		}
+		if len(f.Channels) > 0 {
+			info.ChannelID = f.Channels[0]
+		}
+		resp.Canvases = append(resp.Canvases, info)
+	}
+	return resp, nil
 }
 
 // === Get ===
@@ -107,24 +164,66 @@ type CanvasGetResponse struct {
 	Raw    json.RawMessage `json:"-"`
 }
 
-// CanvasesGet fetches a single canvas. format may be "" (default), "markdown",
-// or "raw" — passed through to Slack.
+// CanvasesGet fetches a single canvas via files.info. canvasID must be an
+// F-prefix file ID (e.g. F0ASWF3SRST). format param is accepted for API
+// compatibility but ignored — the underlying files.info returns the file
+// metadata only; the document content lives at url_private (auth-gated).
+//
+// Underlying Slack method: files.info?file=<F-id>. canvases.get does not
+// exist on Slack public API (confirmed empty at
+// https://api.slack.com/methods?filter=canvases).
 func (c *Client) CanvasesGet(canvasID, format string) (*CanvasGetResponse, error) {
-	params := url.Values{}
-	params.Set("canvas_id", canvasID)
-	if format != "" {
-		params.Set("format", format)
+	if canvasID == "" {
+		return nil, fmt.Errorf("canvas ID required (F-prefix file ID, e.g. F0ASWF3SRST)")
 	}
-	data, err := c.Post("canvases.get", params)
+	if canvasID[0] != 'F' {
+		return nil, fmt.Errorf("canvas ID must be F-prefix file ID (got %q); use 'slackogo canvas list' to find IDs", canvasID)
+	}
+	_ = format // accepted for back-compat; files.info returns metadata regardless
+	params := url.Values{}
+	params.Set("file", canvasID)
+	data, err := c.Post("files.info", params)
 	if err != nil {
 		return nil, err
 	}
-	var resp CanvasGetResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode canvases.get: %w", err)
+	var wire struct {
+		SlackResponse
+		File struct {
+			ID         string   `json:"id"`
+			Title      string   `json:"title"`
+			Name       string   `json:"name"`
+			Filetype   string   `json:"filetype"`
+			Mimetype   string   `json:"mimetype"`
+			User       string   `json:"user"`
+			Channels   []string `json:"channels"`
+			Permalink  string   `json:"permalink"`
+			URLPrivate string   `json:"url_private"`
+			Created    int64    `json:"created"`
+			Updated    int64    `json:"updated"`
+		} `json:"file"`
 	}
-	resp.Raw = data
-	return &resp, nil
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, fmt.Errorf("decode files.info: %w", err)
+	}
+	resp := &CanvasGetResponse{
+		SlackResponse: wire.SlackResponse,
+		Canvas: CanvasInfo{
+			ID:          wire.File.ID,
+			Title:       wire.File.Title,
+			OwnerID:     wire.File.User,
+			URL:         wire.File.Permalink,
+			DateCreated: wire.File.Created,
+			DateUpdated: wire.File.Updated,
+		},
+		Raw: data,
+	}
+	if resp.Canvas.Title == "" {
+		resp.Canvas.Title = wire.File.Name
+	}
+	if len(wire.File.Channels) > 0 {
+		resp.Canvas.ChannelID = wire.File.Channels[0]
+	}
+	return resp, nil
 }
 
 // === Create ===
