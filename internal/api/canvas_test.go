@@ -373,7 +373,8 @@ func TestCanvasesFetchBody_FetchesDownloadURL(t *testing.T) {
 		infoForm = parseForm(t, r)
 		// Point url_private_download back at this same server.
 		dl := srv.URL + "/files-pri/canvas-body"
-		fmt.Fprintf(w, `{"ok":true,"file":{"id":"F1","filetype":"canvas","mimetype":"application/vnd.slack-docs","url_private_download":%q,"size":42}}`, dl)
+		body := "# hello canvas\n\nbody body body."
+		fmt.Fprintf(w, `{"ok":true,"file":{"id":"F1","filetype":"canvas","mimetype":"application/vnd.slack-docs","url_private_download":%q,"size":%d}}`, dl, len(body))
 	})
 	mux.HandleFunc("/files-pri/canvas-body", func(w http.ResponseWriter, r *http.Request) {
 		downloadAuth = r.Header.Get("Authorization")
@@ -421,7 +422,8 @@ func TestCanvasesFetchBody_JSONEnvelopeExtractsMarkdown(t *testing.T) {
 
 	mux.HandleFunc("/files.info", func(w http.ResponseWriter, r *http.Request) {
 		dl := srv.URL + "/dl"
-		fmt.Fprintf(w, `{"ok":true,"file":{"id":"F2","filetype":"canvas","url_private_download":%q,"size":99}}`, dl)
+		body := `{"markdown":"# from envelope","extra":"ignored"}`
+		fmt.Fprintf(w, `{"ok":true,"file":{"id":"F2","filetype":"canvas","url_private_download":%q,"size":%d}}`, dl, len(body))
 	})
 	mux.HandleFunc("/dl", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"markdown":"# from envelope","extra":"ignored"}`))
@@ -519,8 +521,8 @@ func TestCanvasesFetchBody_ErrorsWhenTruncatedAndRangeUnsupported(t *testing.T) 
 	if !strings.Contains(err.Error(), "truncated") {
 		t.Fatalf("err = %v, want truncation error", err)
 	}
-	if downloads != maxCanvasDownloadAttempts {
-		t.Fatalf("downloads = %d, want %d", downloads, maxCanvasDownloadAttempts)
+	if downloads != 2 {
+		t.Fatalf("downloads = %d, want 2", downloads)
 	}
 }
 
