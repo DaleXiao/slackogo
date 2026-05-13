@@ -90,7 +90,9 @@ type ChannelCmd struct {
 	Send ChannelSendCmd `cmd:"" help:"Send a message to a channel"`
 }
 
-type ChannelListCmd struct{}
+type ChannelListCmd struct {
+	Limit int `help:"Max channels to return (0 for all)" default:"0"`
+}
 
 type ChannelReadCmd struct {
 	Channel string `arg:"" help:"Channel name or ID"`
@@ -110,7 +112,9 @@ type DmCmd struct {
 	Send DmSendCmd `cmd:"" help:"Send a DM"`
 }
 
-type DmListCmd struct{}
+type DmListCmd struct {
+	Limit int `help:"Max DM conversations to return (0 for all)" default:"0"`
+}
 
 type DmReadCmd struct {
 	User  string `arg:"" help:"Username or user ID"`
@@ -141,7 +145,7 @@ type UserCmd struct {
 }
 
 type UserListCmd struct {
-	Limit int `help:"Number of users" default:"100"`
+	Limit int `help:"Max users to return (0 for all)" default:"0"`
 }
 
 type UserInfoCmd struct {
@@ -188,13 +192,13 @@ func main() {
 	case "workspace list":
 		err = runWorkspaceList(appCtx)
 	case "channel list":
-		err = runChannelList(appCtx)
+		err = runChannelList(appCtx, &cli.Channel.List)
 	case "channel read <channel>":
 		err = runChannelRead(appCtx, &cli.Channel.Read)
 	case "channel send <channel> <message>":
 		err = runChannelSend(appCtx, &cli.Channel.Send)
 	case "dm list":
-		err = runDmList(appCtx)
+		err = runDmList(appCtx, &cli.Dm.List)
 	case "dm read <user>":
 		err = runDmRead(appCtx, &cli.Dm.Read)
 	case "dm send <user> <message>":
@@ -459,12 +463,12 @@ func runWorkspaceList(ctx *app.Context) error {
 	})
 }
 
-func runChannelList(ctx *app.Context) error {
+func runChannelList(ctx *app.Context, cmd *ChannelListCmd) error {
 	client, err := ctx.NewClient()
 	if err != nil {
 		return err
 	}
-	resp, err := client.ConversationsList("public_channel,private_channel", 200)
+	resp, err := client.ConversationsList("public_channel,private_channel", cmd.Limit)
 	if err != nil {
 		return err
 	}
@@ -537,12 +541,12 @@ func runChannelSend(ctx *app.Context, cmd *ChannelSendCmd) error {
 	return nil
 }
 
-func runDmList(ctx *app.Context) error {
+func runDmList(ctx *app.Context, cmd *DmListCmd) error {
 	client, err := ctx.NewClient()
 	if err != nil {
 		return err
 	}
-	resp, err := client.ConversationsList("im", 200)
+	resp, err := client.ConversationsList("im", cmd.Limit)
 	if err != nil {
 		return err
 	}

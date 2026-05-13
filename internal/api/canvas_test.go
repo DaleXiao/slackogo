@@ -442,6 +442,88 @@ func TestCanvasesFetchBody_JSONEnvelopeExtractsMarkdown(t *testing.T) {
 	}
 }
 
+func TestCanvasesFetchBody_ResumesTruncatedDownload(t *testing.T) {
+	mux := http.NewServeMux()
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r)
+	})
+	defer srv.Close()
+
+	fullBody := "# large canvas\n\n" + strings.Repeat("section\n", 20)
+	firstChunk := fullBody[:40]
+	secondChunk := fullBody[40:]
+	var ranges []string
+
+	mux.HandleFunc("/files.info", func(w http.ResponseWriter, r *http.Request) {
+		dl := srv.URL + "/dl"
+		fmt.Fprintf(w, `{"ok":true,"file":{"id":"F4","filetype":"canvas","url_private_download":%q,"size":%d}}`, dl, len(fullBody))
+	})
+	mux.HandleFunc("/dl", func(w http.ResponseWriter, r *http.Request) {
+		ranges = append(ranges, r.Header.Get("Range"))
+		switch len(ranges) {
+		case 1:
+			_, _ = w.Write([]byte(firstChunk))
+		case 2:
+			if ranges[1] != "bytes=40-" {
+				t.Errorf("resume Range = %q, want bytes=40-", ranges[1])
+			}
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte(secondChunk))
+		default:
+			t.Fatalf("unexpected extra download request")
+		}
+	})
+
+	body, err := c.CanvasesFetchBody("F4")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got := string(body.Raw); got != fullBody {
+		t.Fatalf("Raw = %q, want full body", got)
+	}
+	if body.DownloadedSize != int64(len(fullBody)) {
+		t.Fatalf("DownloadedSize = %d, want %d", body.DownloadedSize, len(fullBody))
+	}
+	if body.ExpectedSize != int64(len(fullBody)) {
+		t.Fatalf("ExpectedSize = %d, want %d", body.ExpectedSize, len(fullBody))
+	}
+	if len(ranges) != 2 {
+		t.Fatalf("download requests = %d, want 2", len(ranges))
+	}
+}
+
+func TestCanvasesFetchBody_ErrorsWhenTruncatedAndRangeUnsupported(t *testing.T) {
+	mux := http.NewServeMux()
+	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r)
+	})
+	defer srv.Close()
+
+	fullBody := "# large canvas\n\n" + strings.Repeat("section\n", 20)
+	truncated := fullBody[:40]
+	downloads := 0
+
+	mux.HandleFunc("/files.info", func(w http.ResponseWriter, r *http.Request) {
+		dl := srv.URL + "/dl"
+		fmt.Fprintf(w, `{"ok":true,"file":{"id":"F5","filetype":"canvas","url_private_download":%q,"size":%d}}`, dl, len(fullBody))
+	})
+	mux.HandleFunc("/dl", func(w http.ResponseWriter, r *http.Request) {
+		downloads++
+		_, _ = w.Write([]byte(truncated))
+	})
+
+	_, err := c.CanvasesFetchBody("F5")
+	if err == nil {
+		t.Fatalf("expected truncation error")
+	}
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("err = %v, want truncation error", err)
+	}
+	if downloads != maxCanvasDownloadAttempts {
+		t.Fatalf("downloads = %d, want %d", downloads, maxCanvasDownloadAttempts)
+	}
+}
+
 func TestCanvasesFetchBody_RejectsNonCanvasFiletype(t *testing.T) {
 	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true,"file":{"id":"F3","filetype":"png","url_private_download":"https://x"}}`))

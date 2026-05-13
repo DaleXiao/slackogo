@@ -39,7 +39,7 @@ type CanvasCmd struct {
 
 type CanvasListCmd struct {
 	Channel string `help:"Limit to a channel id"`
-	Limit   int    `help:"Max canvases to return" default:"100"`
+	Limit   int    `help:"Max canvases to return (0 for all)" default:"0"`
 }
 
 type CanvasGetCmd struct {

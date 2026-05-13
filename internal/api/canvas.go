@@ -96,6 +96,7 @@ type CanvasSection struct {
 // `files.list` with `types=canvas` (filter by canvas filetype).
 
 const filesListPageSize = 1000
+const maxCanvasDownloadAttempts = 3
 
 type filesListFile struct {
 	ID         string   `json:"id"`
@@ -457,9 +458,11 @@ func (c *Client) CanvasesAccessDelete(canvasID string, userIDs []string) error {
 //               as `{"markdown": "..."}` so `-o json` always returns
 //               valid JSON.
 type CanvasBody struct {
-	Raw      []byte          `json:"-"`
-	Markdown string          `json:"markdown,omitempty"`
-	JSON     json.RawMessage `json:"json,omitempty"`
+	Raw            []byte          `json:"-"`
+	Markdown       string          `json:"markdown,omitempty"`
+	JSON           json.RawMessage `json:"json,omitempty"`
+	ExpectedSize   int64           `json:"expected_size,omitempty"`
+	DownloadedSize int64           `json:"downloaded_size,omitempty"`
 	// IsJSON is true when the downloaded payload was valid JSON. When false,
 	// the payload was treated as plain markdown text.
 	IsJSON bool `json:"-"`
@@ -528,39 +531,19 @@ func (c *Client) CanvasesFetchBody(canvasID string) (*CanvasBody, error) {
 		return nil, fmt.Errorf("canvas body: files.info returned no download URL for %s", canvasID)
 	}
 
-	// Step 2 — GET the download URL with workspace creds.
-	req, err := http.NewRequest("GET", dl, nil)
+	// Step 2 — GET the download URL with workspace creds. If Slack or the
+	// network returns fewer bytes than files.info.size, retry with Range so a
+	// large canvas does not silently produce a partial body.
+	body, err := c.downloadCanvasBody(dl, info.File.Size)
 	if err != nil {
-		return nil, fmt.Errorf("canvas body: build request: %w", err)
-	}
-	// xoxc tokens are presented as Authorization: Bearer per Slack's file
-	// download convention; the workspace cookie (d=...) authenticates the
-	// session against files.slack.com.
-	req.Header.Set("Authorization", "Bearer "+c.Creds.Token)
-	req.Header.Set("Cookie", "d="+c.Creds.Cookie)
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("canvas body: GET %s: %w", dl, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		// Read up to 1KiB of the error body for diagnostics.
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("canvas body: download HTTP %d from %s: %s", resp.StatusCode, dl, strings.TrimSpace(string(snippet)))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("canvas body: read body: %w", err)
+		return nil, err
 	}
 
 	out := &CanvasBody{
-		Raw:       body,
-		SourceURL: dl,
+		Raw:            body,
+		ExpectedSize:   info.File.Size,
+		DownloadedSize: int64(len(body)),
+		SourceURL:      dl,
 	}
 
 	// Step 3 — sniff envelope.
@@ -588,4 +571,87 @@ func (c *Client) CanvasesFetchBody(canvasID string) (*CanvasBody, error) {
 		out.Markdown = string(body)
 	}
 	return out, nil
+}
+
+func (c *Client) downloadCanvasBody(dl string, expectedSize int64) ([]byte, error) {
+	var body []byte
+	var lastErr error
+
+	for attempt := 0; attempt < maxCanvasDownloadAttempts; attempt++ {
+		start := int64(len(body))
+		previousSize := start
+
+		chunk, replacedBody, err := c.downloadCanvasBodyChunk(dl, start)
+		if replacedBody {
+			body = body[:0]
+		}
+		if len(chunk) > 0 {
+			body = append(body, chunk...)
+		}
+		if err != nil {
+			lastErr = err
+			if expectedSize <= 0 || int64(len(body)) >= expectedSize {
+				break
+			}
+			continue
+		}
+		if expectedSize <= 0 || int64(len(body)) >= expectedSize {
+			return body, nil
+		}
+
+		lastErr = fmt.Errorf("canvas body: download appears truncated from %s: got %d of %d bytes", dl, len(body), expectedSize)
+		if int64(len(body)) <= previousSize {
+			break
+		}
+	}
+
+	if expectedSize > 0 && int64(len(body)) < expectedSize {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("canvas body: download appears truncated from %s: got %d of %d bytes", dl, len(body), expectedSize)
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return body, nil
+}
+
+func (c *Client) downloadCanvasBodyChunk(dl string, start int64) ([]byte, bool, error) {
+	req, err := http.NewRequest("GET", dl, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("canvas body: build request: %w", err)
+	}
+	// xoxc tokens are presented as Authorization: Bearer per Slack's file
+	// download convention; the workspace cookie (d=...) authenticates the
+	// session against files.slack.com.
+	req.Header.Set("Authorization", "Bearer "+c.Creds.Token)
+	req.Header.Set("Cookie", "d="+c.Creds.Cookie)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0")
+	if start > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("canvas body: GET %s: %w", dl, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		// Read up to 1KiB of the error body for diagnostics.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, false, fmt.Errorf("canvas body: download HTTP %d from %s: %s", resp.StatusCode, dl, strings.TrimSpace(string(snippet)))
+	}
+
+	chunk, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return chunk, false, fmt.Errorf("canvas body: read body: %w", err)
+	}
+
+	// If Slack ignores a resume Range and returns 200, the body is a fresh
+	// full response, not an appendable suffix.
+	replacedBody := start > 0 && resp.StatusCode == http.StatusOK
+	return chunk, replacedBody, nil
 }
