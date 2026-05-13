@@ -24,3 +24,13 @@ jobs:
 
       - name: Build
         run: go build ./cmd/slackogo/
+
+      - name: Build macOS arm64 binary
+        run: |
+          mkdir -p dist
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${GITHUB_SHA}" -o dist/slackogo-darwin-arm64 ./cmd/slackogo/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slackogo-darwin-arm64
+          path: dist/slackogo-darwin-arm64
