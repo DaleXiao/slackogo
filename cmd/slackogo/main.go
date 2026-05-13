@@ -16,7 +16,7 @@ import (
 	"github.com/DaleXiao/slackogo/internal/output"
 )
 
-const version = "0.1.0"
+var version = "dev"
 
 // Exit codes
 const (
