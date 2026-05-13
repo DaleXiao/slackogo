@@ -93,7 +93,9 @@ type CanvasSection struct {
 // Slack canvases are exposed via the files API. There is NO `canvases.list`
 // method (confirmed via https://api.slack.com/methods?filter=canvases — empty).
 // Per https://docs.slack.dev/surfaces/canvases/ we use
-// `files.list` with `types=canvases` (filter by canvas filetype).
+// `files.list` with `types=canvas` (filter by canvas filetype).
+
+const filesListPageSize = 1000
 
 type filesListFile struct {
 	ID         string   `json:"id"`
@@ -111,7 +113,8 @@ type filesListFile struct {
 
 type filesListResponse struct {
 	SlackResponse
-	Files  []filesListFile `json:"files"`
+	Files            []filesListFile  `json:"files"`
+	ResponseMetadata ResponseMetadata `json:"response_metadata"`
 	Paging struct {
 		Count int `json:"count"`
 		Total int `json:"total"`
@@ -122,10 +125,8 @@ type filesListResponse struct {
 
 type CanvasesListResponse struct {
 	SlackResponse
-	Canvases         []CanvasInfo `json:"canvases"`
-	ResponseMetadata struct {
-		NextCursor string `json:"next_cursor"`
-	} `json:"response_metadata"`
+	Canvases         []CanvasInfo     `json:"canvases"`
+	ResponseMetadata ResponseMetadata `json:"response_metadata"`
 }
 
 // CanvasesList lists canvases visible to the caller. channelID is optional;
@@ -139,44 +140,80 @@ type CanvasesListResponse struct {
 // hot-fixes this to "canvas".
 // Canvas IDs returned are F-prefix file IDs (e.g. F0ASWF3SRST).
 func (c *Client) CanvasesList(channelID string, limit int) (*CanvasesListResponse, error) {
-	params := url.Values{}
-	params.Set("types", "canvas")
-	if channelID != "" {
-		params.Set("channel", channelID)
-	}
-	if limit > 0 {
-		params.Set("count", fmt.Sprintf("%d", limit))
-	}
-	data, err := c.Post("files.list", params)
-	if err != nil {
-		return nil, err
-	}
-	var fl filesListResponse
-	if err := json.Unmarshal(data, &fl); err != nil {
-		return nil, fmt.Errorf("decode files.list: %w", err)
-	}
-	resp := &CanvasesListResponse{SlackResponse: fl.SlackResponse}
-	for _, f := range fl.Files {
-		// Defensive filter — types=canvases server-side filter, but be paranoid.
-		if f.Filetype != "" && f.Filetype != "canvas" && f.Filetype != "quip" {
+	resp := &CanvasesListResponse{}
+	pageNumber := 1
+	cursor := ""
+
+	for {
+		pageSize := pageLimit(limit, len(resp.Canvases), filesListPageSize)
+		if pageSize == 0 {
+			break
+		}
+
+		params := url.Values{}
+		params.Set("types", "canvas")
+		params.Set("count", fmt.Sprintf("%d", pageSize))
+		if channelID != "" {
+			params.Set("channel", channelID)
+		}
+		if cursor != "" {
+			params.Set("cursor", cursor)
+		} else if pageNumber > 1 {
+			params.Set("page", fmt.Sprintf("%d", pageNumber))
+		}
+
+		data, err := c.Post("files.list", params)
+		if err != nil {
+			return nil, err
+		}
+		var fl filesListResponse
+		if err := json.Unmarshal(data, &fl); err != nil {
+			return nil, fmt.Errorf("decode files.list: %w", err)
+		}
+		resp.SlackResponse = fl.SlackResponse
+		resp.ResponseMetadata = fl.ResponseMetadata
+
+		for _, f := range fl.Files {
+			// Defensive filter — types=canvas server-side filter, but be paranoid.
+			if f.Filetype != "" && f.Filetype != "canvas" && f.Filetype != "quip" {
+				continue
+			}
+			info := CanvasInfo{
+				ID:          f.ID,
+				Title:       f.Title,
+				OwnerID:     f.User,
+				URL:         f.Permalink,
+				DateCreated: f.Created,
+				DateUpdated: f.Updated,
+			}
+			if info.Title == "" {
+				info.Title = f.Name
+			}
+			if len(f.Channels) > 0 {
+				info.ChannelID = f.Channels[0]
+			}
+			resp.Canvases = append(resp.Canvases, info)
+			if limit > 0 && len(resp.Canvases) >= limit {
+				resp.Canvases = resp.Canvases[:limit]
+				return resp, nil
+			}
+		}
+
+		nextCursor := fl.ResponseMetadata.NextCursor
+		if nextCursor != "" && nextCursor != cursor {
+			cursor = nextCursor
 			continue
 		}
-		info := CanvasInfo{
-			ID:          f.ID,
-			Title:       f.Title,
-			OwnerID:     f.User,
-			URL:         f.Permalink,
-			DateCreated: f.Created,
-			DateUpdated: f.Updated,
+		if fl.Paging.Pages > 0 && fl.Paging.Page < fl.Paging.Pages {
+			pageNumber = fl.Paging.Page + 1
+			if pageNumber <= 1 {
+				pageNumber++
+			}
+			continue
 		}
-		if info.Title == "" {
-			info.Title = f.Name
-		}
-		if len(f.Channels) > 0 {
-			info.ChannelID = f.Channels[0]
-		}
-		resp.Canvases = append(resp.Canvases, info)
+		break
 	}
+
 	return resp, nil
 }
 

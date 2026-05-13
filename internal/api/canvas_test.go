@@ -86,7 +86,7 @@ func TestCanvasesList_RequestParams(t *testing.T) {
 	}
 }
 
-func TestCanvasesList_OmitsEmptyChannel(t *testing.T) {
+func TestCanvasesList_OmitsEmptyChannelAndUsesDefaultPageSize(t *testing.T) {
 	var captured url.Values
 	c, srv := newMockClient(t, func(w http.ResponseWriter, r *http.Request) {
 		captured = parseForm(t, r)
@@ -100,8 +100,8 @@ func TestCanvasesList_OmitsEmptyChannel(t *testing.T) {
 	if _, ok := captured["channel"]; ok {
 		t.Errorf("channel should be omitted when empty")
 	}
-	if _, ok := captured["count"]; ok {
-		t.Errorf("count should be omitted when zero")
+	if got := captured.Get("count"); got != "1000" {
+		t.Errorf("count = %q, want default page size 1000", got)
 	}
 	if captured.Get("types") != "canvas" {
 		t.Errorf("types should always be canvas (singular)")

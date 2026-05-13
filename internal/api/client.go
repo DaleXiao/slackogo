@@ -36,6 +36,29 @@ type SlackResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+type ResponseMetadata struct {
+	NextCursor string `json:"next_cursor"`
+}
+
+const (
+	conversationsPageSize = 1000
+	usersPageSize         = 200
+)
+
+func pageLimit(limit, collected, maxPageSize int) int {
+	if limit <= 0 {
+		return maxPageSize
+	}
+	remaining := limit - collected
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining < maxPageSize {
+		return remaining
+	}
+	return maxPageSize
+}
+
 func (c *Client) Post(method string, params url.Values) (json.RawMessage, error) {
 	if params == nil {
 		params = url.Values{}
@@ -122,23 +145,63 @@ type AuthTestResponse struct {
 
 // ConversationsList lists channels
 func (c *Client) ConversationsList(types string, limit int) (*ConversationsListResponse, error) {
+	resp := &ConversationsListResponse{}
+	cursor := ""
+
+	for {
+		pageSize := pageLimit(limit, len(resp.Channels), conversationsPageSize)
+		if pageSize == 0 {
+			break
+		}
+
+		page, err := c.conversationsListPage(types, pageSize, cursor)
+		if err != nil {
+			return nil, err
+		}
+		resp.SlackResponse = page.SlackResponse
+		resp.Channels = append(resp.Channels, page.Channels...)
+		resp.ResponseMetadata = page.ResponseMetadata
+
+		if limit > 0 && len(resp.Channels) >= limit {
+			resp.Channels = resp.Channels[:limit]
+			break
+		}
+		nextCursor := page.ResponseMetadata.NextCursor
+		if nextCursor == "" || nextCursor == cursor {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	return resp, nil
+}
+
+func (c *Client) conversationsListPage(types string, pageSize int, cursor string) (*ConversationsListResponse, error) {
 	params := url.Values{}
 	if types != "" {
 		params.Set("types", types)
 	}
-	params.Set("limit", fmt.Sprintf("%d", limit))
+	params.Set("limit", fmt.Sprintf("%d", pageSize))
 	params.Set("exclude_archived", "true")
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
+
 	data, err := c.Post("conversations.list", params)
 	if err != nil {
 		return nil, err
 	}
 	var resp ConversationsListResponse
-	return &resp, json.Unmarshal(data, &resp)
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 type ConversationsListResponse struct {
 	SlackResponse
-	Channels []Channel `json:"channels"`
+	Channels         []Channel        `json:"channels"`
+	ResponseMetadata ResponseMetadata `json:"response_metadata"`
 }
 
 type Channel struct {
@@ -231,19 +294,59 @@ type SearchChannel struct {
 
 // UsersList lists users
 func (c *Client) UsersList(limit int) (*UsersListResponse, error) {
+	resp := &UsersListResponse{}
+	cursor := ""
+
+	for {
+		pageSize := pageLimit(limit, len(resp.Members), usersPageSize)
+		if pageSize == 0 {
+			break
+		}
+
+		page, err := c.usersListPage(pageSize, cursor)
+		if err != nil {
+			return nil, err
+		}
+		resp.SlackResponse = page.SlackResponse
+		resp.Members = append(resp.Members, page.Members...)
+		resp.ResponseMetadata = page.ResponseMetadata
+
+		if limit > 0 && len(resp.Members) >= limit {
+			resp.Members = resp.Members[:limit]
+			break
+		}
+		nextCursor := page.ResponseMetadata.NextCursor
+		if nextCursor == "" || nextCursor == cursor {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	return resp, nil
+}
+
+func (c *Client) usersListPage(pageSize int, cursor string) (*UsersListResponse, error) {
 	params := url.Values{}
-	params.Set("limit", fmt.Sprintf("%d", limit))
+	params.Set("limit", fmt.Sprintf("%d", pageSize))
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
+
 	data, err := c.Post("users.list", params)
 	if err != nil {
 		return nil, err
 	}
 	var resp UsersListResponse
-	return &resp, json.Unmarshal(data, &resp)
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 type UsersListResponse struct {
 	SlackResponse
-	Members []User `json:"members"`
+	Members          []User           `json:"members"`
+	ResponseMetadata ResponseMetadata `json:"response_metadata"`
 }
 
 type User struct {
@@ -327,14 +430,22 @@ func (c *Client) ResolveChannelID(nameOrID string) (string, error) {
 	// Strip # prefix
 	nameOrID = strings.TrimPrefix(nameOrID, "#")
 
-	resp, err := c.ConversationsList("public_channel,private_channel", 1000)
-	if err != nil {
-		return "", err
-	}
-	for _, ch := range resp.Channels {
-		if ch.Name == nameOrID {
-			return ch.ID, nil
+	cursor := ""
+	for {
+		page, err := c.conversationsListPage("public_channel,private_channel", conversationsPageSize, cursor)
+		if err != nil {
+			return "", err
 		}
+		for _, ch := range page.Channels {
+			if ch.Name == nameOrID {
+				return ch.ID, nil
+			}
+		}
+		nextCursor := page.ResponseMetadata.NextCursor
+		if nextCursor == "" || nextCursor == cursor {
+			break
+		}
+		cursor = nextCursor
 	}
 	return "", fmt.Errorf("channel %q not found", nameOrID)
 }
@@ -346,14 +457,22 @@ func (c *Client) ResolveUserID(nameOrID string) (string, error) {
 	}
 	nameOrID = strings.TrimPrefix(nameOrID, "@")
 
-	resp, err := c.UsersList(1000)
-	if err != nil {
-		return "", err
-	}
-	for _, u := range resp.Members {
-		if u.Name == nameOrID || u.Profile.DisplayName == nameOrID {
-			return u.ID, nil
+	cursor := ""
+	for {
+		page, err := c.usersListPage(usersPageSize, cursor)
+		if err != nil {
+			return "", err
 		}
+		for _, u := range page.Members {
+			if u.Name == nameOrID || u.Profile.DisplayName == nameOrID {
+				return u.ID, nil
+			}
+		}
+		nextCursor := page.ResponseMetadata.NextCursor
+		if nextCursor == "" || nextCursor == cursor {
+			break
+		}
+		cursor = nextCursor
 	}
 	return "", fmt.Errorf("user %q not found", nameOrID)
 }
